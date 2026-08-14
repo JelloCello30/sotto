@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sotto — silent speech input for your browser</title>
-  <meta name="description" content="Sotto watches your mouth through your camera and types the phrases you silently mouth at it. On-device, no audio, no cloud. A research preview.">
+  <title>Sotto — quiet speech input for your browser</title>
+  <meta name="description" content="Sotto types what you say to your camera: calibrated phrases mouthed in silence, or open-vocabulary dictation you whisper. Everything on-device, nothing uploaded. A research preview.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FAF7F2">
   <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#131110">
@@ -42,7 +42,7 @@
     <section class="hero wrap" aria-labelledby="hero-title">
       <div class="hero-copy">
         <h1 id="hero-title">Type with your lips, not your fingers.</h1>
-        <p class="lede">Sotto watches your mouth through your camera and types the phrases you silently mouth at it. It runs on-device in your browser — no audio captured, no cloud involved.</p>
+        <p class="lede">Sotto watches your mouth through your camera and types for you — calibrated phrases you mouth in silence, or open-vocabulary dictation you whisper. Both modes run on-device in your browser; nothing is uploaded.</p>
         <div class="hero-ctas">
           <a class="btn-accent" href="app.html">Try the live demo</a>
           <a class="btn-ghost" href="#how">See how it works</a>
@@ -59,14 +59,14 @@
     <aside class="honesty" aria-label="What Sotto is and is not">
       <div class="wrap">
         <span class="tick" aria-hidden="true">n.b.</span>
-        <p class="soft">Sotto reads a vocabulary you teach it — phrases today, not free dictation. We'd rather show you something real that works now than promise something that doesn't exist yet.</p>
+        <p class="soft">Two modes, honestly labeled. Phrase mode reads a vocabulary you teach it, in total silence, camera only. Whisper mode takes any words you can at least whisper: your lips decide when it listens, a local speech model decides what you said. Neither is silent open-vocabulary lipreading — that doesn't exist yet, here or anywhere.</p>
       </div>
     </aside>
 
     <!-- ============ how it works ============ -->
     <section id="how" class="section wrap" aria-labelledby="how-title">
       <p class="kicker">How it works</p>
-      <h2 id="how-title">Three steps, no magic.</h2>
+      <h2 id="how-title">Three steps, no magic. One new mode.</h2>
       <ol class="ledger">
         <li>
           <span class="num" aria-hidden="true">01</span>
@@ -76,15 +76,20 @@
         <li>
           <span class="num" aria-hidden="true">02</span>
           <h3>Mouth it</h3>
-          <p>When your lips start moving, Sotto notices, and cuts the utterance out of the stream on its own. No button to hold, no wake word — there is no audio to wake to.</p>
+          <p>When your lips start moving, Sotto notices, and cuts the utterance out of the stream on its own. No button to hold, no wake word — your lips are the signal.</p>
         </li>
         <li>
           <span class="num" aria-hidden="true">03</span>
           <h3>It types</h3>
           <p>The closest phrase in your library lands in the pad with a confidence score attached. Turn on auto-copy and it goes straight to your clipboard.</p>
         </li>
+        <li>
+          <span class="num" aria-hidden="true">04</span>
+          <h3>Or whisper it</h3>
+          <p>New in v0.2: Whisper mode drops the vocabulary and adds the microphone. Your lips still decide when Sotto listens — audio only counts while your own mouth is moving, which shuts out background speech — and a vendored Whisper model running on this device decides what you said. A whisper is enough; full silence is not.</p>
+        </li>
       </ol>
-      <p class="soft pipeline">The pipeline, precisely: <span class="mono">MediaPipe Face Landmarker</span> (478 landmarks and 52 blendshapes per frame, entirely on-device) → 22 mouth features per frame → utterance segmentation by motion energy → <span class="mono">DTW</span> template matching against your calibrated phrases. No lipreading neural net, no server. That is the entire trick, and it is enough.</p>
+      <p class="soft pipeline">The pipeline, precisely: <span class="mono">MediaPipe Face Landmarker</span> (478 landmarks and 52 blendshapes per frame, entirely on-device) → 22 mouth features per frame → utterance segmentation by motion energy → <span class="mono">DTW</span> template matching against your calibrated phrases. No lipreading neural net, no server. That is the entire trick, and it is enough. Whisper mode adds one branch: the same lip segmentation clips a matching window from a local microphone buffer and hands it to a vendored <span class="mono">Whisper</span> model (transformers.js on ONNX Runtime — WebGPU when available, WASM otherwise). The lips gate when; the audio decides what. Still no server.</p>
     </section>
 
     <!-- ============ app mockup ============ -->
@@ -193,19 +198,20 @@
         <details>
           <summary>Does this replace my keyboard?<span class="mark" aria-hidden="true">+</span></summary>
           <div class="answer">
-            <p>No. Today Sotto types phrases you have taught it — a calibrated vocabulary, not free dictation. Open-vocabulary lipreading is an unsolved research problem: the best published systems, trained on enormous curated datasets, still miss roughly a quarter of the words. From a webcam, in your kitchen lighting, it is harder still. We would rather hand you thirty phrases that work than a keyboard that guesses.</p>
+            <p>Phrase mode, no: it types phrases you have taught it — a calibrated vocabulary, fully silent, mic-free. Whisper mode gets closer: open-vocabulary dictation, transcribed on this device, with your lips gating when it listens. The honest catch is that it needs at least whispered speech — air moving through actual words. Open dictation from lip movement alone remains an unsolved research problem: the best published systems, trained on enormous curated datasets, still miss roughly a quarter of the words. From a webcam, in your kitchen lighting, it is harder still. So: if you can whisper, you can dictate. If you must stay fully silent, you have your phrases — and they work.</p>
           </div>
         </details>
         <details>
           <summary>Is audio recorded?<span class="mark" aria-hidden="true">+</span></summary>
           <div class="answer">
-            <p>No. Sotto never requests microphone permission, so your browser cannot hand it audio even by accident. Video frames are processed on-device by the face landmarker and discarded; what persists is a small set of motion numbers per phrase, stored in your browser. Nothing is uploaded, because there is nowhere to upload it to.</p>
+            <p>Two modes, two answers. Phrase mode: never — microphone permission is not even requested, so your browser cannot hand Sotto audio by accident. Whisper mode: the microphone is live while that mode is on, and the audio is processed on this device by a local speech model, in memory. Nothing is recorded, stored, or uploaded — there is no server in the pipeline at all. Switch back to Phrase mode and the mic turns off immediately.</p>
+            <p>Video is the same story in both modes: frames are processed on-device by the face landmarker and discarded. What persists is your phrase library — a small set of motion numbers per phrase, stored in your browser.</p>
           </div>
         </details>
         <details>
           <summary>Why do I have to calibrate?<span class="mark" aria-hidden="true">+</span></summary>
           <div class="answer">
-            <p>Because lips underdetermine speech. Many sounds are made in the throat or with the tongue and look identical from the outside — mouth "pat", "bat", and "mat" at a mirror and watch. A personal template vocabulary turns an impossible guessing game into a tractable one: Sotto only has to decide which of your phrases you mouthed, on your face, in your light. That constraint is what makes it reliable.</p>
+            <p>Because lips underdetermine speech. Many sounds are made in the throat or with the tongue and look identical from the outside — mouth "pat", "bat", and "mat" at a mirror and watch. A personal template vocabulary turns an impossible guessing game into a tractable one: Sotto only has to decide which of your phrases you mouthed, on your face, in your light. That constraint is what makes it reliable. Calibration belongs to Phrase mode; Whisper mode skips it entirely, because it has audio to listen to.</p>
           </div>
         </details>
         <details>
@@ -226,7 +232,7 @@
       <p class="tag">Made for quiet rooms, loud cafés, and resting voices.</p>
       <span class="spacer"></span>
       <a class="footer-app" href="app.html">Open the app</a>
-      <small>Research preview — v0.1</small>
+      <small>Research preview — v0.2</small>
     </div>
   </footer>
 

@@ -2,20 +2,31 @@
 
 *sotto voce* — under the voice.
 
-Sotto is a silent-speech input instrument. You mouth words at your camera; it types
-them. No audio is ever captured, and nothing leaves your machine.
+Sotto is a quiet-speech input instrument with two modes:
 
-It is a **research preview**, and it is honest about what that means: Sotto does
-**calibrated-vocabulary silent phrase input**, not open-vocabulary dictation. You
-teach it a small set of phrases by mouthing each one a few times. Afterwards it
-recognizes those phrases — and only those — from lip movement alone. Within that
-constraint, it works, and it is quietly satisfying to use.
+- **Phrase mode** (the default): calibrated silent-phrase input. You mouth
+  phrases you have taught it; it types them from lip movement alone. Camera
+  only — the microphone is never requested.
+- **Whisper mode** (new in v0.2): open-vocabulary dictation. You whisper (or
+  speak), and a vendored Whisper model transcribes it on-device, with your lip
+  movement deciding when the microphone is worth listening to.
+
+Everything runs in your browser, on your machine. Nothing is uploaded in either
+mode.
+
+It is a **research preview**, and it is honest about what that means. Phrase
+mode is vocabulary-bound: it recognizes the phrases you taught it, and only
+those, but it does so in complete silence. Whisper mode is open-vocabulary, but
+it is not lipreading: the audio decides *what* you said; the lips only decide
+*when* to listen. Within those constraints, both work, and they are quietly
+satisfying to use.
 
 ## How it works
 
 The whole pipeline runs in your browser, on your device:
 
-1. **Camera.** `getUserMedia` video only. The microphone is never requested.
+1. **Camera.** `getUserMedia` video only. In Phrase mode the microphone is
+   never requested.
 2. **Face tracking.** A vendored copy of MediaPipe Tasks Vision (`FaceLandmarker`,
    WASM) tracks one face per frame, GPU delegate with CPU fallback.
 3. **Features.** Each frame is reduced to a 22-dimensional vector: 18
@@ -32,6 +43,47 @@ The whole pipeline runs in your browser, on your device:
    runner-up. Otherwise Sotto says nothing, which is the correct thing to say.
 6. **Output.** The matched phrase is typed into the composer. Your phrase library
    lives in `localStorage` and can be exported and imported as JSON.
+7. **Whisper branch (Whisper mode only).** The same segmentation timestamps clip
+   a padded window from a rolling in-memory microphone buffer; the clipped audio
+   is transcribed by a local Whisper model in a worker, and the text lands in
+   the composer verbatim. Template matching (step 5) is bypassed in this mode.
+
+## Whisper mode
+
+Phrase mode's constraint is its vocabulary. Whisper mode removes it, at an
+honestly stated price: it needs to hear you, at least a little.
+
+**What it is.** Open-vocabulary dictation, transcribed by a vendored copy of
+OpenAI's Whisper (quantized ONNX encoder and decoder plus tokenizer, under
+`vendor/whisper/`) running through transformers.js on ONNX Runtime — WebGPU
+when the browser offers it, WASM otherwise. Fully on-device; the model files
+ship with the site, so no network is involved at any point.
+
+**The fusion design.** A microphone alone would transcribe everything — your
+podcast, your officemate, the television. So the lip tracker gates it. Audio is
+captured through an AudioWorklet into a rolling 30-second ring buffer at 16kHz
+(raw PCM, in memory, never persisted). When the v0.1 engine's segmentation sees
+*your* mouth start and stop moving, that utterance's time window — padded a
+quarter second on each side — is clipped from the buffer and handed to the
+model. Speech that happens while your mouth is still is never transcribed. The
+lips decide *when*; the audio decides *what*. It is sensor fusion, not
+lipreading.
+
+**Cost.** The speech model (Whisper base.en, 8-bit ONNX) is a one-time download
+of roughly 75MB, precached by the service worker like everything else. Measured
+on an M-series MacBook on the single-threaded WASM path: about 2.5 seconds to
+transcribe a 3-second utterance once warm, roughly double on the first
+utterance. WebGPU is attempted first and is faster where it works; a built-in
+canary transcription (a public-domain 1961 JFK inaugural excerpt) checks the
+GPU build actually decodes speech and quietly falls back to WASM when it
+doesn't — some GPU stacks produce garbage without ever throwing an error.
+Inference runs in a module worker, so the interface stays responsive while you
+wait.
+
+**Switching.** The mode control lives in the app's camera column, and the
+choice persists. Leaving Whisper mode releases the microphone immediately — the
+browser's mic indicator turns off with it. The speech model stays loaded so
+switching back is instant.
 
 ## Running it
 
@@ -48,7 +100,7 @@ one. Use a browser with camera support; Chrome, Edge, and Safari are all fine.
 ## Installing as a PWA
 
 Sotto ships a web app manifest and a service worker that precaches everything,
-including the model. After the first load it works fully offline — on a deployed
+including both models. After the first load it works fully offline — on a deployed
 (non-localhost) origin. Under `serve.py` on localhost the service worker
 deliberately does not register, so development never fights a stale cache;
 install-to-Dock/Home-Screen still works from localhost, but offline does not.
@@ -72,36 +124,66 @@ sotto/
 │   └── app.css              app-only styles
 ├── js/
 │   ├── engine.js            SottoEngine: tracking, segmentation, DTW matching
+│   ├── audio.js             SottoMic: mic capture into a 16kHz ring buffer
+│   ├── audio-worklet.js     AudioWorklet processor feeding that buffer
+│   ├── asr.js               SottoASR: main-thread wrapper around the ASR worker
+│   ├── asr-worker.js        module worker running Whisper via transformers.js
 │   ├── app.js               app UI wiring
 │   └── landing.js           landing page behavior
 ├── assets/                  logo, icons, favicon
 ├── vendor/
 │   ├── inter/               InterVariable (woff2)
-│   └── mediapipe/           Tasks Vision bundle, WASM fileset, face model
+│   ├── mediapipe/           Tasks Vision bundle, WASM fileset, face model
+│   ├── transformers/        transformers.js ESM + ONNX Runtime backend
+│   └── whisper/             Whisper checkpoint: quantized ONNX + tokenizer
 ├── sw.js                    service worker (offline shell)
 ├── manifest.webmanifest     PWA manifest
 ├── serve.py                 static dev server, port 4173
 ├── DESIGN.md                design system and voice
-└── SPEC.md                  engine specification
+├── SPEC.md                  v0.1 engine specification
+└── SPEC-V2.md               v0.2 Whisper mode specification
 ```
 
 ## Privacy
 
-This part is short because there is nothing to disclose.
+Short, and stated per mode.
+
+Both modes:
 
 - Everything runs on-device. Video frames are processed in memory and discarded.
-- No audio is captured; the microphone permission is never requested.
-- No network requests after load. Fonts, model, and WASM are all vendored — there
-  are no CDNs, no analytics, no telemetry, no accounts.
-- Your phrase library is stored in your browser's `localStorage` and goes nowhere
-  unless you export it yourself.
+- No network requests after load. Fonts, models, and WASM are all vendored —
+  there are no CDNs, no analytics, no telemetry, no accounts.
+- Your phrase library is stored in your browser's `localStorage` and goes
+  nowhere unless you export it yourself.
+
+Phrase mode:
+
+- No audio, ever. The microphone permission is never requested, so the browser
+  has nothing to hand over.
+
+Whisper mode:
+
+- The microphone is live while the mode is on. Audio sits in a 30-second
+  in-memory ring buffer, and clipped utterances are transcribed on this device
+  by the local model. Nothing is written to disk, stored, or uploaded — there
+  is no server in the pipeline. Switching back to Phrase mode stops the
+  microphone immediately.
 
 ## Current limitations
 
 Stated plainly, because they are real:
 
-- **Calibrated vocabulary only.** Sotto recognizes phrases you have taught it —
-  up to 60 phrases with up to 8 takes each. It cannot transcribe arbitrary speech.
+- **Phrase mode is calibrated vocabulary only.** It recognizes phrases you have
+  taught it — up to 60 phrases with up to 8 takes each. It cannot transcribe
+  arbitrary speech; that is what Whisper mode is for, and Whisper mode needs
+  sound.
+- **Whisper mode is not lipreading.** It needs at least whispered speech — some
+  audible airflow through real words. Mouthing in complete silence gives the
+  model nothing to work with. The lips only gate when it listens.
+- **Whisper mode inherits Whisper's habits.** Very faint whispers, unusual
+  vocabulary, and noisy rooms degrade transcription, and the model can
+  hallucinate on near-silence (Sotto filters the classic cases, but not all of
+  them).
 - **Visually similar phrases collide.** Many sounds are indistinguishable on the
   lips ("pat" and "bat" are the same movie). Phrases that look alike when mouthed
   will confuse the matcher; pick phrases that move your mouth differently.

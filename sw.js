@@ -11,7 +11,7 @@
  *   - Old sotto-* caches are deleted on activate.
  */
 
-const CACHE = 'sotto-v1';
+const CACHE = 'sotto-v2';
 
 const PRECACHE = [
   './',
@@ -21,6 +21,10 @@ const PRECACHE = [
   'css/landing.css',
   'css/app.css',
   'js/engine.js',
+  'js/audio.js',
+  'js/audio-worklet.js',
+  'js/asr.js',
+  'js/asr-worker.js',
   'js/app.js',
   'js/landing.js',
   'manifest.webmanifest',
@@ -37,6 +41,17 @@ const PRECACHE = [
   'vendor/mediapipe/wasm/vision_wasm_internal.wasm',
   'vendor/mediapipe/wasm/vision_wasm_nosimd_internal.js',
   'vendor/mediapipe/wasm/vision_wasm_nosimd_internal.wasm',
+  'vendor/canary.wav',
+  'vendor/transformers/transformers.min.js',
+  'vendor/transformers/ort-wasm-simd-threaded.jsep.mjs',
+  'vendor/transformers/ort-wasm-simd-threaded.jsep.wasm',
+  'vendor/whisper/base/config.json',
+  'vendor/whisper/base/generation_config.json',
+  'vendor/whisper/base/preprocessor_config.json',
+  'vendor/whisper/base/tokenizer.json',
+  'vendor/whisper/base/tokenizer_config.json',
+  'vendor/whisper/base/onnx/encoder_model_quantized.onnx',
+  'vendor/whisper/base/onnx/decoder_model_merged_quantized.onnx',
 ];
 
 self.addEventListener('install', (event) => {

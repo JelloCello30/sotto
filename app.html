@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>sotto. — the pad</title>
-  <meta name="description" content="Sotto research preview. Calibrated silent-phrase input: teach it a phrase, mouth it at the camera, it types it. On-device, no audio.">
+  <meta name="description" content="Sotto research preview. Two on-device input modes: calibrated silent phrases (camera only) and Whisper dictation, where lip movement decides when the microphone is heard. Nothing uploaded.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#FAF7F2" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#131110" media="(prefers-color-scheme: dark)">
@@ -31,11 +31,22 @@
   </header>
 
   <main class="wrap app-main" id="main">
-    <h1 class="visually-hidden">Sotto — silent phrase input</h1>
+    <h1 class="visually-hidden">Sotto — silent phrase input and whisper dictation</h1>
 
     <!-- ============ camera column (5/12) ============ -->
     <section class="col-cam" aria-labelledby="cam-h">
       <h2 class="visually-hidden" id="cam-h">Camera</h2>
+
+      <div class="mode-switch" id="mode-switch" role="radiogroup" aria-label="Input mode">
+        <label class="mode-opt">
+          <input type="radio" name="input-mode" value="phrases" id="mode-phrases" checked>
+          <span>Phrases</span>
+        </label>
+        <label class="mode-opt">
+          <input type="radio" name="input-mode" value="whisper" id="mode-whisper">
+          <span>Whisper</span>
+        </label>
+      </div>
 
       <div class="card cam-card">
         <div class="cam-frame" id="cam-frame">
@@ -60,13 +71,35 @@
             <button class="btn" id="cam-empty-btn">Start camera</button>
           </div>
 
+          <div class="cam-empty mic-empty" id="mic-empty" hidden>
+            <div class="bars" aria-hidden="true"><span></span><span></span><span></span></div>
+            <h3 id="mic-empty-title">Microphone blocked</h3>
+            <p class="soft" id="mic-empty-body"></p>
+            <div class="mic-empty-actions">
+              <button class="btn" id="mic-empty-retry">Try Whisper again</button>
+              <button class="btn-ghost" id="mic-empty-dismiss">Stay in Phrases</button>
+            </div>
+          </div>
+
+          <div class="asr-note" id="asr-note" role="status" hidden>
+            <span id="asr-note-text">Loading speech model — ~75MB, one time.</span>
+            <span class="asr-progress" id="asr-progress" hidden aria-hidden="true"><i id="asr-progress-fill"></i></span>
+          </div>
+
+          <span class="mic-meter" id="mic-meter" hidden>
+            <span aria-hidden="true">mic</span>
+            <span class="mic-track" aria-hidden="true"><i id="mic-level"></i></span>
+            <span class="visually-hidden">Microphone is live</span>
+          </span>
+
           <div class="toast-region" id="toast-region" aria-live="polite"></div>
         </div>
+        <p class="cam-privacy" id="cam-privacy">Phrase mode: camera only. No audio is captured; frames are processed on this device and discarded.</p>
       </div>
 
       <div class="cam-controls">
         <button class="btn" id="cam-toggle">Start camera</button>
-        <div class="ctl">
+        <div class="ctl ctl-sens">
           <label for="sensitivity">Sensitivity</label>
           <input type="range" id="sensitivity" min="0" max="1" step="0.01" value="0.5"
                  aria-describedby="sens-hint">
@@ -76,7 +109,7 @@
         <label class="switch">
           <input type="checkbox" id="pause-toggle">
           <span class="track" aria-hidden="true"></span>
-          <span class="switch-label">Pause matching</span>
+          <span class="switch-label" id="pause-label">Pause matching</span>
         </label>
       </div>
 
@@ -107,7 +140,7 @@
             <label class="switch">
               <input type="checkbox" id="autocopy-toggle">
               <span class="track" aria-hidden="true"></span>
-              <span class="switch-label">Auto-copy each match</span>
+              <span class="switch-label" id="autocopy-label">Auto-copy each match</span>
             </label>
             <button class="btn-ghost btn-sm" id="copy-btn">Copy all</button>
             <button class="btn-ghost btn-sm" id="clear-btn">Clear</button>
@@ -137,7 +170,7 @@
     </section>
   </main>
 
-  <p class="wrap app-foot soft">No audio is captured. The camera feed, the model, and your phrasebook stay on this device.</p>
+  <p class="wrap app-foot soft" id="app-foot">No audio is captured. The camera feed, the model, and your phrasebook stay on this device.</p>
 
   <!-- ============ settings drawer ============ -->
   <aside class="card drawer" id="settings-drawer" aria-labelledby="settings-h" hidden>
@@ -165,6 +198,11 @@
     </div>
 
     <hr class="rule">
+
+    <div class="drawer-block" id="asr-block" hidden>
+      <h4>Whisper mode</h4>
+      <p class="soft" id="asr-info"></p>
+    </div>
 
     <p class="soft drawer-foot">Everything runs on this device. The phrasebook lives in your browser's local storage — Export is the backup.</p>
   </aside>
