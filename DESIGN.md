@@ -1,12 +1,21 @@
 # Sotto — Design System & Voice
 
-Sotto (from *sotto voce* — "under the voice") is a silent-speech input instrument.
-You mouth words; it types them. No audio is ever captured. Everything runs on-device.
+Sotto (from *sotto voce* — "under the voice") is a quiet-speech input instrument
+with two modes. Phrase mode reads calibrated silent phrases from lip movement —
+camera only, no audio ever captured. Whisper mode is on-device dictation: the
+microphone is live while it is on, and lip movement decides when it is heard.
+Everything runs on-device; nothing is uploaded in either mode.
 
 ## Positioning (honest, always)
 
-- It is a **research preview**. It does calibrated-vocabulary silent phrase input,
-  not open-vocabulary dictation. Never imply otherwise.
+- It is a **research preview**. Phrase mode is calibrated-vocabulary silent
+  input, not open-vocabulary dictation. Whisper mode is open-vocabulary
+  dictation, not lipreading — it needs at least a whisper of audio, and the
+  lips only decide *when* it listens. Never imply more than either mode does.
+- Privacy claims are scoped per mode. Phrase mode never requests the
+  microphone. Whisper mode listens while it is on, transcribes on this device,
+  and uploads nothing. The claims that hold everywhere: on-device, nothing
+  leaves the machine.
 - No fabricated numbers, testimonials, press logos, user counts, or fake download
   buttons. Confidence comes from the working demo, not from invented proof.
 - Voice: plainspoken, precise, a little wry. Short sentences. No hype adjectives

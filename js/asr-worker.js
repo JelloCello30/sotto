@@ -61,14 +61,24 @@ const MIN_NEW_TOKENS_CAP = 32;
 /**
  * Decode-loop detection, a runtime second line of defense against GPUs
  * whose q8 kernels are silently broken: output logits are garbage and the
- * decoder loops one phrase until the token cap. Real dictation essentially
- * never repeats one word 8 times in a row, and never consists (at 30+
- * words) of 60 percent one single word. A false positive is benign: the
- * job is retried once on wasm and still returns correct text.
+ * decoder repeats one word or short phrase until it exhausts the token
+ * budget. That exhaustion is the tell — no verdict is reached unless the
+ * output's word count reached LOOP_NEAR_CAP of the job's max_new_tokens
+ * (word count is a floor on token count, so the gate is conservative). A
+ * real "yes yes yes yes yes yes yes yes" never gets near its budget; a
+ * genuine runaway decode always does. Past that gate the tells are: one
+ * word repeated LOOP_RUN_LEN times in a row, one word making up
+ * LOOP_DOMINANCE of a LOOP_MIN_WORDS+ output, or a 2-3 word phrase
+ * repeated back to back LOOP_NGRAM_REPEATS times. A false positive is NOT
+ * benign — it demotes webgpu and tears down a healthy pipeline for a full
+ * wasm rebuild — which is why the near-cap gate comes first.
  */
+const LOOP_NEAR_CAP = 0.6;
 const LOOP_MIN_WORDS = 30;
 const LOOP_RUN_LEN = 8;
 const LOOP_DOMINANCE = 0.6;
+const LOOP_NGRAM_MAX = 3;
+const LOOP_NGRAM_REPEATS = 4;
 
 /**
  * Load-time canary validation, the primary defense: some GPUs build the
@@ -314,13 +324,21 @@ function normalizeText(text) {
 }
 
 /**
- * True when the text looks like a runaway decode loop: a single word
- * repeated LOOP_RUN_LEN times in a row, or (for long outputs) one word
- * making up LOOP_DOMINANCE of all words. Real speech never does either.
+ * True when the text looks like a runaway decode loop for a job that was
+ * allowed maxNewTokens new tokens. See the LOOP_* constants for the
+ * rationale; the near-cap gate keeps legitimate repetition ("yes yes yes")
+ * from tearing down a healthy webgpu pipeline.
+ * @param {string} text decoder output
+ * @param {number} maxNewTokens the max_new_tokens the job ran with
  */
-function looksLikeDecodeLoop(text) {
+function looksLikeDecodeLoop(text, maxNewTokens) {
   const words = text.split(/\s+/).filter(Boolean);
+  if (!Number.isFinite(maxNewTokens) || words.length < maxNewTokens * LOOP_NEAR_CAP) {
+    return false;
+  }
   if (words.length < LOOP_RUN_LEN) return false;
+
+  // Tell 1: one word repeated LOOP_RUN_LEN times in a row.
   let run = 1;
   const counts = new Map();
   for (let i = 0; i < words.length; i++) {
@@ -333,10 +351,30 @@ function looksLikeDecodeLoop(text) {
       run = 1;
     }
   }
+
+  // Tell 2: one word dominating a long output.
   if (words.length >= LOOP_MIN_WORDS) {
     let max = 0;
     for (const c of counts.values()) if (c > max) max = c;
     if (max / words.length >= LOOP_DOMINANCE) return true;
+  }
+
+  // Tell 3: a short phrase looped whole ("Thank you. Thank you. ..."):
+  // any 2- or 3-word window repeated back to back LOOP_NGRAM_REPEATS
+  // times. Every phase is scanned so the loop is caught wherever it
+  // starts in the sentence.
+  for (let n = 2; n <= LOOP_NGRAM_MAX; n++) {
+    for (let phase = 0; phase < n; phase++) {
+      let repeats = 1;
+      for (let i = phase; i + 2 * n <= words.length; i += n) {
+        let same = true;
+        for (let k = 0; k < n; k++) {
+          if (words[i + k] !== words[i + n + k]) { same = false; break; }
+        }
+        repeats = same ? repeats + 1 : 1;
+        if (repeats >= LOOP_NGRAM_REPEATS) return true;
+      }
+    }
   }
   return false;
 }
@@ -360,7 +398,8 @@ async function doTranscribe(audio) {
     // Some GPUs fail silently: no exception, but broken q8 kernels make the
     // decoder loop garbage. Only judge real speech — silence legitimately
     // produces repetitive hallucinations on healthy hardware.
-    if (device === 'webgpu' && rms >= SILENCE_RMS && looksLikeDecodeLoop(text || '')) {
+    if (device === 'webgpu' && rms >= SILENCE_RMS
+        && looksLikeDecodeLoop(text || '', opts.max_new_tokens)) {
       gpuFailedLate = true;
     }
   } catch (err) {

@@ -1,7 +1,7 @@
 {
   "name": "Sotto",
   "short_name": "Sotto",
-  "description": "Silent phrase input from lip movement. Calibrated vocabulary, fully on-device. A research preview.",
+  "description": "Two on-device input modes: calibrated silent phrases (camera only) and Whisper dictation, where lip movement decides when the microphone is heard. Nothing uploaded. A research preview.",
   "lang": "en",
   "start_url": "app.html",
   "scope": "./",

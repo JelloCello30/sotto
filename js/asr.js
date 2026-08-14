@@ -8,6 +8,7 @@
  * Exports:
  *   SottoASR (default + named) — the wrapper class per SPEC-V2.md
  *   SottoASRError              — typed error with .code
+ *   WASM_TIMEOUT_MS            — default transcribe timeout on the wasm path
  *
  * Usage:
  *   const asr = new SottoASR({ onStatus });
@@ -16,13 +17,17 @@
  *   asr.dispose();
  *
  * Device selection is automatic: webgpu when available, wasm otherwise,
- * with fallback to wasm when the GPU fails at load, at first inference, or
- * silently (broken q8 kernels that decode garbage loops). Pass
+ * with fallback to wasm when the GPU fails at load, stalls at load (shader
+ * compiles that hang for minutes without erroring), fails at first
+ * inference, or fails silently (broken q8 kernels that decode garbage
+ * loops). Pass
  * { device: 'wasm' } to the constructor to skip webgpu entirely — useful
  * for benchmarking and for machines with known-bad GPU drivers.
  *
  * onStatus(status, detail) statuses:
- *   'loading-model'  detail.progress is 0-100 when transformers.js reports it
+ *   'loading-model'  detail.progress is 0-100 when transformers.js reports
+ *                    it; detail.message is set when a stalled webgpu load
+ *                    is being retried on wasm
  *   'warming'        warm-up inference in progress (detail.device set)
  *   'ready'          model loaded and warm (detail.device: 'webgpu' | 'wasm')
  *   'error'          load or worker failure (detail.message)
@@ -37,8 +42,26 @@
 // Tunables
 // ---------------------------------------------------------------------------
 
-/** Default per-job timeout for transcribe(). */
+/** Default per-job timeout for transcribe() when inference runs on webgpu. */
 const DEFAULT_TIMEOUT_MS = 30000;
+
+/**
+ * Default per-job timeout when inference runs on wasm. GitHub Pages sends
+ * no COOP/COEP headers, so the page is never crossOriginIsolated, there is
+ * no SharedArrayBuffer, and ONNX runs its wasm backend on a single thread —
+ * several times slower than webgpu on the same machine. Applied
+ * automatically at dispatch time when the loaded device is wasm; an
+ * explicit timeoutMs from the caller always wins.
+ */
+export const WASM_TIMEOUT_MS = 60000;
+
+/**
+ * Watchdog for one load attempt. A webgpu shader compile can hang for
+ * minutes without ever erroring (observed in the wild); without a timer
+ * load() would never settle. On expiry the worker is terminated and, if
+ * the attempt allowed webgpu, the load is retried once on wasm.
+ */
+const LOAD_TIMEOUT_MS = 120000;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -86,7 +109,7 @@ export class SottoASR {
     this._inflightId = null;   // id of the transcribe job the worker holds
   }
 
-  /** Inference device once loaded: 'webgpu' | 'wasm' | null before load. */
+  /** Inference device: 'webgpu' | 'wasm'; null before load and after a stalled worker is torn down. */
   get device() {
     return this._device;
   }
@@ -99,8 +122,10 @@ export class SottoASR {
   /**
    * Load the model in the worker and warm it up. Idempotent: repeated calls
    * return the same promise while loading and a resolved one once ready.
-   * A failed load clears state so a later call can retry. Rejects with a
-   * SottoASRError carrying the failure message.
+   * Each attempt runs under a LOAD_TIMEOUT_MS watchdog — a stalled webgpu
+   * load is retried once on wasm — so load() always settles. A failed load
+   * clears state so a later call can retry. Rejects with a SottoASRError
+   * carrying the failure message.
    * @returns {Promise<void>}
    */
   load() {
@@ -118,14 +143,17 @@ export class SottoASR {
 
   /**
    * Transcribe mono 16 kHz PCM. Jobs are queued FIFO; each has its own
-   * timeout. Resolves with the transcription, or '' for silence/no-speech
+   * timeout, defaulting to DEFAULT_TIMEOUT_MS on webgpu and WASM_TIMEOUT_MS
+   * on wasm (single-threaded wasm needs the headroom — see the constant).
+   * Resolves with the transcription, or '' for silence/no-speech
    * (including suppressed Whisper silence hallucinations).
    * The input array is transferred, not copied — see module header.
    * @param {Float32Array} audio mono PCM at 16000 Hz
-   * @param {{ timeoutMs?: number }} [opts]
+   * @param {{ timeoutMs?: number }} [opts] an explicit timeoutMs overrides
+   *   the per-device default; 0 or a non-finite value disables the timeout
    * @returns {Promise<string>}
    */
-  async transcribe(audio, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  async transcribe(audio, { timeoutMs } = {}) {
     if (!(audio instanceof Float32Array)) {
       throw new SottoASRError('bad-input', 'transcribe() expects a Float32Array of 16 kHz mono PCM');
     }
@@ -199,12 +227,52 @@ export class SottoASR {
   }
 
   async _doLoad() {
+    try {
+      await this._loadAttempt(this._preferredDevice);
+      return;
+    } catch (err) {
+      if (!this._isLoadStall(err) || this._preferredDevice === 'wasm') {
+        throw this._terminalLoadError(err);
+      }
+    }
+    // The webgpu attempt stalled. Rebuild a fresh worker and retry exactly
+    // once, skipping the GPU entirely.
+    this._emitStatus('loading-model', { message: 'GPU path stalled, retrying on CPU' });
+    try {
+      await this._loadAttempt('wasm');
+    } catch (err) {
+      throw this._terminalLoadError(err);
+    }
+  }
+
+  /**
+   * One load attempt against the worker (building it if needed), guarded
+   * by the LOAD_TIMEOUT_MS watchdog. On expiry the pending entry is retired
+   * and the worker terminated — a stalled shader compile never yields, so
+   * the worker cannot be salvaged — and the attempt rejects with the
+   * internal 'load-stalled' code so _doLoad can decide whether a wasm
+   * retry is due.
+   * @param {'auto'|'wasm'} device
+   * @returns {Promise<void>} resolves once the model is loaded and warm
+   */
+  async _loadAttempt(device) {
     this._ensureWorker();
     const id = this._nextId++;
     const result = new Promise((resolve, reject) => {
-      this._pending.set(id, { resolve, reject, stale: false, code: 'load-failed' });
+      const entry = { resolve, reject, stale: false, code: 'load-failed', timer: undefined };
+      entry.timer = setTimeout(() => {
+        entry.stale = true;
+        entry.timer = undefined;
+        this._pending.delete(id);
+        if (this._worker) {
+          this._worker.terminate();
+          this._worker = null;
+        }
+        reject(new SottoASRError('load-stalled', `model load exceeded ${LOAD_TIMEOUT_MS} ms`));
+      }, LOAD_TIMEOUT_MS);
+      this._pending.set(id, entry);
     });
-    this._worker.postMessage({ id, type: 'load', payload: { device: this._preferredDevice } });
+    this._worker.postMessage({ id, type: 'load', payload: { device } });
     try {
       const payload = await result;
       this._device = payload.device || this._device;
@@ -213,6 +281,27 @@ export class SottoASR {
       if (err instanceof SottoASRError) throw err;
       throw new SottoASRError('load-failed', err && err.message ? err.message : String(err));
     }
+  }
+
+  /** True for the internal watchdog rejection produced by _loadAttempt. */
+  _isLoadStall(err) {
+    return err instanceof SottoASRError && err.code === 'load-stalled';
+  }
+
+  /**
+   * Normalize a terminal load failure. The internal 'load-stalled' code
+   * never escapes: callers see 'load-failed'. Watchdog expiries are also
+   * the one path that emits an 'error' status from here — on every other
+   * failure the worker posted one itself before its error reply.
+   */
+  _terminalLoadError(err) {
+    if (!this._isLoadStall(err)) {
+      if (err instanceof SottoASRError) return err;
+      return new SottoASRError('load-failed', err && err.message ? err.message : String(err));
+    }
+    const out = new SottoASRError('load-failed', err.message);
+    this._emitStatus('error', { message: out.message });
+    return out;
   }
 
   _onWorkerMessage(msg) {
@@ -254,21 +343,40 @@ export class SottoASR {
     const id = this._nextId++;
     this._inflightId = id;
 
+    // Resolve the timeout at dispatch time, once the device is known: wasm
+    // is single-threaded here (no COOP/COEP on GitHub Pages) and needs more
+    // headroom than webgpu. An explicit caller timeout always wins.
+    const timeoutMs = job.timeoutMs !== undefined
+      ? job.timeoutMs
+      : (this._device === 'wasm' ? WASM_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
+
     const entry = {
       resolve: (payload) => job.resolve(typeof payload.text === 'string' ? payload.text : ''),
       reject: job.reject,
       stale: false,
       timer: undefined,
     };
-    if (Number.isFinite(job.timeoutMs) && job.timeoutMs > 0) {
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
       entry.timer = setTimeout(() => {
-        // Reject the caller now; keep the pending entry so the worker's late
-        // reply (it cannot abort mid-inference) is discarded and unblocks
-        // the queue when it eventually arrives.
+        // The worker cannot abort mid-inference, and a job that outlives
+        // its timeout has in practice wedged the backend (observed: webgpu
+        // hangs that never return). Queued jobs' timers only start at
+        // dispatch, so leaving the worker alive would strand them behind
+        // this one forever. Reject the caller, kill the worker, and fail
+        // everything else fast — the app retries per job, and the next
+        // transcribe() (or load()) rebuilds a fresh worker.
         entry.stale = true;
         entry.timer = undefined;
-        job.reject(new SottoASRError('timeout', `transcription exceeded ${job.timeoutMs} ms`));
-      }, job.timeoutMs);
+        job.reject(new SottoASRError('timeout', `transcription exceeded ${timeoutMs} ms`));
+        if (this._worker) {
+          this._worker.terminate();
+          this._worker = null;
+        }
+        this._device = null;
+        const message = 'transcriber stalled and will reload on the next request';
+        this._failEverything(new SottoASRError('worker-error', message));
+        this._emitStatus('error', { message });
+      }, timeoutMs);
     }
     this._pending.set(id, entry);
 

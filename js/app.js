@@ -119,6 +119,7 @@ let mode = 'phrases';       // 'phrases' | 'whisper'
 const whisper = {
   session: 0,       // bumped on every leave; stale async completions check it and bail
   entering: false,  // enter lifecycle in flight (radios disabled meanwhile)
+  deferred: false,  // restored from storage without a gesture; mic + model wait for one
   mic: null,        // SottoMic instance, created lazily on first entry
   asr: null,        // SottoASR instance, created lazily on first entry
   modPromise: null, // Promise for the dynamic imports of audio.js + asr.js
@@ -297,12 +298,20 @@ const EMPTY_COPY_WHISPER_OFF = {
   btn: 'Start camera',
 };
 
+// A restored Whisper preference waits for a gesture (see whisper.deferred);
+// the button below is that gesture, so say what it will actually do.
+const EMPTY_COPY_WHISPER_DEFERRED = {
+  title: 'Camera is off',
+  body: 'Whisper mode is selected, but nothing is listening yet. Starting the camera also turns on the microphone and loads the speech model — all on this device, nothing uploaded.',
+  btn: 'Start camera',
+};
+
 let lastEmptyKind = 'off'; // so a mode switch can refresh the visible copy
 
 function showCamEmpty(kind, detail) {
   lastEmptyKind = kind;
   const copy = (kind === 'off' && mode === 'whisper')
-    ? EMPTY_COPY_WHISPER_OFF
+    ? (whisper.deferred ? EMPTY_COPY_WHISPER_DEFERRED : EMPTY_COPY_WHISPER_OFF)
     : (EMPTY_COPY[kind] || EMPTY_COPY.off);
   camEmptyTitle.textContent = copy.title;
   camEmptyBody.textContent = kind === 'error' && detail ? `${copy.body} Detail: ${detail}` : copy.body;
@@ -435,7 +444,9 @@ function renderPractice(stats, accepted) {
 
 const engine = new SottoEngine({
   onState(state, detail) {
+    const prev = engineState;
     engineState = state;
+    trackLongUtterance(prev, state);
     switch (state) {
       case 'loading':
         hideCamEmpty();
@@ -475,6 +486,7 @@ const engine = new SottoEngine({
     pushSample(frame.mouthOpen);
     drawWave();
     if (whisper.mic && whisper.mic.running) updateMicMeter();
+    else checkMicDisconnect();
     const now = performance.now();
     if (now - lastFpsAt > 500) {
       lastFpsAt = now;
@@ -539,6 +551,9 @@ window.__sotto = { engine, whisper };
 
 async function startCamera() {
   if (running) return;
+  // Starting the camera while a restored Whisper selection is waiting counts
+  // as the gesture that arms it: mic and model start alongside the camera.
+  runDeferredWhisper();
   camToggle.disabled = true;
   camEmptyBtn.disabled = true;
   engineState = 'loading';
@@ -594,6 +609,11 @@ sensitivity.addEventListener('input', () => {
 
 pauseToggle.addEventListener('change', () => {
   engine.setPaused(pauseToggle.checked);
+  if (pauseToggle.checked && mode === 'whisper') {
+    // Pause means pause: queued audio does not outlive it, and an in-flight
+    // result is dropped when it lands (see pumpTranscribe).
+    whisper.queue.length = 0;
+  }
   renderStatus();
 });
 
@@ -605,6 +625,9 @@ const PRIVACY_PHRASES =
   'Phrase mode: camera only. No audio is captured; frames are processed on this device and discarded.';
 const PRIVACY_WHISPER =
   'Whisper mode: microphone on, processed on this device, nothing uploaded. Lip movement decides when it listens; the audio decides what was said.';
+// While a restored selection waits for a gesture, "microphone on" would be a lie.
+const PRIVACY_WHISPER_DEFERRED =
+  'Whisper mode: selected, microphone still off. Starting the camera turns it on — processed on this device, nothing uploaded.';
 
 const FOOT_PHRASES =
   'No audio is captured. The camera feed, the model, and your phrasebook stay on this device.';
@@ -626,6 +649,11 @@ const MIC_EMPTY_COPY = {
     title: 'Speech model failed to load',
     body: 'Whisper mode could not start its on-device speech model. You are back in Phrases mode.',
     retry: 'Try again',
+  },
+  lost: {
+    title: 'Microphone disconnected',
+    body: 'The microphone went away mid-session — unplugged, or the system withdrew it. Nothing has been transcribed since. You are back in Phrases — camera only, no audio.',
+    retry: 'Try Whisper again',
   },
 };
 
@@ -652,7 +680,9 @@ function syncModeUI() {
   modePhrases.checked = !whisperOn;
   modeWhisper.checked = whisperOn;
   appMain.classList.toggle('mode-whisper', whisperOn);
-  camPrivacy.textContent = whisperOn ? PRIVACY_WHISPER : PRIVACY_PHRASES;
+  camPrivacy.textContent = whisperOn
+    ? (whisper.deferred ? PRIVACY_WHISPER_DEFERRED : PRIVACY_WHISPER)
+    : PRIVACY_PHRASES;
   appFoot.textContent = whisperOn ? FOOT_WHISPER : FOOT_PHRASES;
   pauseLabel.textContent = whisperOn ? 'Pause transcribing' : 'Pause matching';
   autocopyLabel.textContent = whisperOn ? 'Auto-copy each transcription' : 'Auto-copy each match';
@@ -672,6 +702,13 @@ function setModeControlsDisabled(disabled) {
 async function enterWhisper() {
   const session = ++whisper.session;
   whisper.entering = true;
+  micLostShown = false;
+  // Disabling the radios below blurs a focused one to <body>; remember it so
+  // the finally can hand focus back (a11y: keyboard mode switching).
+  const focusedRadio =
+    document.activeElement === modePhrases || document.activeElement === modeWhisper
+      ? document.activeElement
+      : null;
   setModeControlsDisabled(true);
   hideMicEmpty();
   try {
@@ -716,13 +753,21 @@ async function enterWhisper() {
   } finally {
     whisper.entering = false;
     setModeControlsDisabled(false);
+    // If the blur landed on <body> and nothing (like the mic empty state)
+    // claimed focus since, restore it to whichever radio is now checked —
+    // Phrases after a failed entry, Whisper after a successful one.
+    if (focusedRadio && document.activeElement === document.body) {
+      (modeWhisper.checked ? modeWhisper : modePhrases).focus();
+    }
   }
 }
 
 function leaveWhisper() {
   whisper.session += 1; // any in-flight transcription result is discarded
+  whisper.deferred = false; // a deliberate move to Phrases cancels a deferred entry
   whisper.queue.length = 0;
   whisper.busy = false;
+  cancelLongUtterToast();
   if (whisper.mic) {
     try { whisper.mic.stop(); } catch { /* already stopped */ }
   }
@@ -732,9 +777,25 @@ function leaveWhisper() {
   // The ASR stays loaded — re-entering Whisper mode is instant.
 }
 
+/**
+ * Run the entry lifecycle for a Whisper selection that was restored from
+ * storage without a gesture (whisper.deferred). Called only from real user
+ * gestures — the Start camera buttons, or a click on the Whisper radio — so
+ * the mic permission prompt and the model load never happen on page load.
+ * @returns {boolean} true if a deferred entry was started
+ */
+function runDeferredWhisper() {
+  if (!whisper.deferred || mode !== 'whisper') return false;
+  whisper.deferred = false;
+  syncModeUI(); // drop the "still off" privacy line and empty-state copy
+  enterWhisper();
+  return true;
+}
+
 /* ------- fusion: lip segment -> audio slice -> transcription ------- */
 
 function handleWhisperSegment(seg) {
+  cancelLongUtterToast(); // a segment arrived, so the utterance was not discarded
   if (!whisper.mic || !whisper.mic.running || !whisper.asr || !whisper.ready) return;
   let audio;
   try {
@@ -765,6 +826,9 @@ function pumpTranscribe() {
   renderStatus();
   whisper.asr.transcribe(audio).then((text) => {
     if (session !== whisper.session) return;
+    // Pause honesty: while the pill says "paused", a result that was already
+    // in flight must not reach the pad, a toast, or the clipboard.
+    if (pauseToggle.checked) return;
     const clean = (text || '').trim();
     if (clean) {
       appendToPad(clean); // verbatim beyond appendToPad's usual sentence-start casing
@@ -785,6 +849,45 @@ function toastTranscript(text) {
   const words = text.split(/\s+/);
   const head = words.slice(0, 4).join(' ');
   toast(words.length > 4 ? `${head}…` : head, null);
+}
+
+/* ------- long-utterance feedback ------- */
+
+// The engine discards any utterance longer than MAX_SEG_MS without emitting a
+// segment, which in Whisper mode reads as words silently vanishing. Time the
+// 'speaking' state app-side and say why nothing landed. The threshold sits
+// below MAX_SEG_MS because the engine's segment clock starts on pre-roll
+// frames captured before the state flips to 'speaking'.
+const LONG_UTTER_MS = CONSTANTS.MAX_SEG_MS - 400;
+let speakingSince = 0;     // performance.now() when 'speaking' began
+let longUtterTimer = null; // pending "ran long" toast; an arriving segment cancels it
+
+/**
+ * Called on every engine state transition (from onState).
+ * @param {string} prev previous engine state
+ * @param {string} state new engine state
+ */
+function trackLongUtterance(prev, state) {
+  if (state === 'speaking' && prev !== 'speaking') {
+    speakingSince = performance.now();
+    return;
+  }
+  if (prev !== 'speaking' || state === 'speaking') return;
+  if (mode !== 'whisper' || simulated) return;
+  if (performance.now() - speakingSince <= LONG_UTTER_MS) return;
+  // Give a real segment 500 ms to arrive before concluding it was discarded.
+  clearTimeout(longUtterTimer);
+  longUtterTimer = setTimeout(() => {
+    longUtterTimer = null;
+    toast('that ran past six seconds — pause briefly between sentences', null, 'miss');
+  }, 500);
+}
+
+function cancelLongUtterToast() {
+  if (longUtterTimer) {
+    clearTimeout(longUtterTimer);
+    longUtterTimer = null;
+  }
 }
 
 /* ------- ASR status + settings info ------- */
@@ -877,6 +980,27 @@ micEmptyRetry.addEventListener('click', () => {
 });
 micEmptyDismiss.addEventListener('click', () => hideMicEmpty());
 
+/* ------- mic disconnect watchdog ------- */
+
+// One-shot per Whisper entry: set when the disconnect state has been shown,
+// reset by enterWhisper, so the polling paths cannot spam it.
+let micLostShown = false;
+
+/**
+ * The mic track can end under us — headset unplugged, OS-level revocation —
+ * and SottoMic stops itself silently when it does. Without this check the
+ * pill would keep saying "watching" while every segment gets dropped by
+ * handleWhisperSegment's running guard. Polled from onFrame and micMeterLoop.
+ */
+function checkMicDisconnect() {
+  if (micLostShown) return;
+  if (mode !== 'whisper' || whisper.entering) return;
+  if (!whisper.mic || whisper.mic.running) return;
+  micLostShown = true;
+  setMode('phrases'); // stops routing and stops the pill claiming otherwise
+  showMicEmpty('lost');
+}
+
 /* ------- mic level meter ------- */
 
 let micRafId = 0;
@@ -884,7 +1008,15 @@ let micRafId = 0;
 function updateMicMeter() {
   if (!whisper.mic || !whisper.mic.running) return;
   let lvl = 0;
-  try { lvl = clamp01(Number(whisper.mic.level()) || 0); } catch { lvl = 0; }
+  // Display scaling: SottoMic.level() is raw smoothed RMS, and its JSDoc puts
+  // normal speech around 0.05-0.3 and whispers around 0.01-0.1 — raw values
+  // would leave the bar nearly empty. sqrt lifts the whisper range; the 1.8
+  // gain puts normal speech near full scale.
+  try {
+    lvl = clamp01(Math.sqrt(Number(whisper.mic.level()) || 0) * 1.8);
+  } catch {
+    lvl = 0;
+  }
   micLevel.style.width = `${Math.round(lvl * 100)}%`;
 }
 
@@ -892,6 +1024,7 @@ function micMeterLoop() {
   micRafId = 0;
   if (!whisper.mic || !whisper.mic.running) {
     micMeter.hidden = true;
+    checkMicDisconnect();
     return;
   }
   // The engine's onFrame drives the meter while the camera loop runs; this
@@ -921,6 +1054,12 @@ modePhrases.addEventListener('change', () => {
 });
 modeWhisper.addEventListener('change', () => {
   if (modeWhisper.checked) setMode('whisper');
+});
+modeWhisper.addEventListener('click', () => {
+  // A deferred restore leaves this radio checked with the mic off, and
+  // re-clicking a checked radio fires no 'change'. The click itself is the
+  // gesture that arms the real entry lifecycle.
+  runDeferredWhisper();
 });
 
 /* ---------------------------------------------------------------- phrasebook */
@@ -1457,9 +1596,15 @@ drawWave();
 growPad();
 sensOut.textContent = Number(sensitivity.value).toFixed(2);
 
-// Restore the persisted input mode. 'whisper' re-runs the whole entry
-// lifecycle (mic prompt + model load); any failure drops back to Phrases.
+// Restore the persisted input mode. A stored 'whisper' only sets the UI —
+// no getUserMedia, no model load, no permission prompt without a gesture.
+// The first gesture that implies Whisper use (Start camera, or a click on
+// the Whisper radio) runs the real entry lifecycle via runDeferredWhisper.
 syncModeUI();
 let storedMode = null;
 try { storedMode = localStorage.getItem(MODE_KEY); } catch { storedMode = null; }
-if (storedMode === 'whisper') setMode('whisper');
+if (storedMode === 'whisper') {
+  mode = 'whisper';
+  whisper.deferred = true;
+  syncModeUI();
+}
