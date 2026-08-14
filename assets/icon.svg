@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Sotto app icon">
+  <!-- Rounded-square ground. The glyph stays inside the central 66% (87..425)
+       so maskable crops (circle, squircle, rounded rect) never clip it. -->
+  <rect width="512" height="512" rx="112" fill="#1C1917"/>
+  <!-- Three bars, decreasing width: a mouth closing, a fading voice. -->
+  <rect x="112" y="152" width="288" height="48" rx="24" fill="#FAF7F2"/>
+  <rect x="112" y="232" width="208" height="48" rx="24" fill="#FAF7F2" opacity="0.75"/>
+  <rect x="112" y="312" width="128" height="48" rx="24" fill="#C2410C"/>
+</svg>

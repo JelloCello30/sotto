@@ -1,0 +1,447 @@
+/* Sotto — landing page layout. Tokens and core components come from styles.css.
+   This file defines page structure only; no color literals, variables only. */
+
+/* ---------- page-level ---------- */
+
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+}
+
+section[id] { scroll-margin-top: 24px; }
+
+.skip {
+  position: absolute; left: -9999px; top: 0;
+  background: var(--card); color: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--radius-ctl);
+  padding: 10px 16px; z-index: 20; text-decoration: none; font-weight: 600;
+}
+.skip:focus { left: 16px; top: 16px; }
+
+a:focus-visible, button:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 0.875em;
+  font-weight: 500;
+}
+
+.kicker {
+  font: 600 0.8125rem var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 12px;
+}
+
+.btn-sm { padding: 9px 16px; }
+
+.section { padding-top: 72px; }
+.section:last-of-type { padding-bottom: 8px; }
+
+@media (min-width: 1280px) {
+  .section { padding-top: 88px; }
+}
+
+/* ---------- nav responsiveness ---------- */
+
+@media (max-width: 719px) {
+  .nav .navlink { display: none; }
+}
+@media (max-width: 479px) {
+  .nav { gap: 10px; }
+  .nav .btn-sm { padding: 8px 12px; font-size: 0.875rem; }
+}
+
+/* ---------- hero ---------- */
+
+.hero {
+  display: grid;
+  gap: 44px;
+  align-items: center;
+  padding-top: 56px;
+  padding-bottom: 56px;
+}
+.hero-copy .lede {
+  font-size: 1.125rem;
+  max-width: 34em;
+  margin-top: 20px;
+}
+.hero-ctas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 28px 0 16px;
+}
+.hero-note {
+  font-size: 0.9375rem;
+  margin: 0;
+}
+
+@media (min-width: 768px) {
+  .hero {
+    grid-template-columns: 7fr 5fr;
+    gap: 56px;
+    padding-top: 88px;
+    padding-bottom: 72px;
+  }
+}
+@media (min-width: 1280px) {
+  .hero { gap: 80px; padding-top: 104px; }
+}
+
+/* ---------- lip-wave motif ---------- */
+
+.lipwave {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: clamp(150px, 26vw, 260px);
+}
+.lipwave .bar {
+  flex: 1 1 0;
+  min-width: 2px;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--ink);
+  opacity: 0.72;
+  transform: scaleY(var(--mid, 0.4));
+  transform-origin: 50% 50%;
+  animation: lipmove var(--dur, 3.4s) ease-in-out var(--delay, 0s) infinite;
+  will-change: transform;
+}
+.lipwave .bar.is-accent {
+  background: var(--accent);
+  opacity: 1;
+}
+
+@keyframes lipmove {
+  0%, 100% { transform: scaleY(var(--mid, 0.4)); }
+  28%      { transform: scaleY(var(--peak, 0.8)); }
+  52%      { transform: scaleY(var(--low, 0.12)); }
+  76%      { transform: scaleY(var(--mid2, 0.5)); }
+}
+
+/* Reduced motion: freeze every bar at its mid height. The global rule in
+   styles.css shortens durations, but an explicit stop is cleaner here. */
+@media (prefers-reduced-motion: reduce) {
+  .lipwave .bar { animation: none; }
+}
+
+.lipwave--strip {
+  height: 44px;
+  gap: 3px;
+}
+
+.lipwave-caption {
+  margin: 12px 0 0;
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+}
+
+/* ---------- honesty strip ---------- */
+
+.honesty {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.honesty .wrap {
+  display: flex;
+  gap: 16px;
+  align-items: baseline;
+  padding-top: 18px;
+  padding-bottom: 18px;
+}
+.honesty .tick {
+  font: 600 0.8125rem var(--mono);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.honesty p {
+  margin: 0;
+  font-size: 0.9375rem;
+  max-width: 62em;
+}
+
+/* ---------- how it works: ledger list ---------- */
+
+.ledger {
+  list-style: none;
+  margin: 36px 0 0;
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+}
+.ledger li {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 4px 20px;
+  padding: 26px 0;
+  border-top: 1px solid var(--line);
+}
+.ledger .num {
+  grid-row: 1;
+  font: 600 0.9375rem var(--mono);
+  color: var(--accent);
+  padding-top: 3px;
+}
+.ledger h3 {
+  grid-column: 2;
+  margin: 0;
+}
+.ledger li p {
+  grid-column: 2;
+  margin: 0;
+  color: var(--ink-soft);
+  max-width: 52em;
+}
+
+@media (min-width: 768px) {
+  .ledger li {
+    grid-template-columns: 72px 220px 1fr;
+    gap: 36px;
+    align-items: baseline;
+  }
+  .ledger h3, .ledger li p { grid-column: auto; }
+}
+
+.pipeline {
+  margin: 32px 0 0;
+  font-size: 0.9375rem;
+  max-width: 66em;
+}
+
+/* ---------- app mockup ---------- */
+
+.mock {
+  margin-top: 36px;
+  overflow: hidden;
+}
+.mock-grid { display: grid; }
+
+@media (min-width: 768px) {
+  .mock-grid { grid-template-columns: 5fr 7fr; }
+}
+
+.mock-cam {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+}
+@media (min-width: 768px) {
+  .mock-cam { border-bottom: none; border-right: 1px solid var(--line); }
+}
+
+.mock-view {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  overflow: hidden;
+}
+.mock-pill {
+  position: absolute;
+  top: 10px; left: 10px;
+}
+.mock-tag {
+  position: absolute;
+  top: 14px; right: 12px;
+  font: 500 0.75rem var(--mono);
+  color: var(--ink-soft);
+}
+.mock-oval {
+  position: absolute;
+  left: 27%; right: 27%; top: 16%; bottom: 14%;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+}
+.mock-mouth {
+  position: absolute;
+  left: 41%; top: 53%;
+  width: 18%; height: 9%;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+}
+.lmk {
+  position: absolute;
+  left: var(--x); top: var(--y);
+  width: 3px; height: 3px;
+  margin: -1.5px;
+  border-radius: 50%;
+  background: var(--ink-soft);
+}
+
+.mock-pad {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px 20px;
+}
+.mock-pad-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.mock-pad-title {
+  font-weight: 620;
+  letter-spacing: -0.01em;
+}
+.mock-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--line);
+}
+.mock-row:last-child { border-bottom: none; }
+.mock-phrase { font-weight: 500; }
+.mock-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.mock-t {
+  font: 400 0.75rem var(--mono);
+  color: var(--ink-soft);
+}
+.mock-row-caret { padding-top: 16px; }
+.mock-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.15em;
+  background: var(--accent);
+}
+.mock-caption {
+  margin: 16px 0 0;
+  font-size: 0.9375rem;
+}
+
+/* ---------- install tabs ---------- */
+
+.install-lede { max-width: 46em; }
+
+.tablist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-top: 28px;
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 10px 14px;
+  font: 600 0.9375rem/1.2 var(--font);
+  letter-spacing: -0.01em;
+  color: var(--ink-soft);
+  cursor: pointer;
+  border-radius: 6px 6px 0 0;
+  transition: color 160ms ease-out, background 160ms ease-out;
+}
+.tab:hover { color: var(--ink); background: var(--line); }
+.tab[aria-selected="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.tabpanel { padding: 22px 0 4px; }
+.tabpanel[hidden] { display: none; }
+
+.steps {
+  margin: 0;
+  padding-left: 1.25em;
+  max-width: 56em;
+}
+.steps li { margin-bottom: 8px; }
+.steps li:last-child { margin-bottom: 0; }
+
+.install-req {
+  margin: 28px 0 0;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  font-size: 0.9375rem;
+}
+.install-note {
+  margin: 6px 0 0;
+  font-size: 0.9375rem;
+}
+
+/* ---------- faq ---------- */
+
+.faq {
+  max-width: 780px;
+  margin-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.faq details {
+  border-bottom: 1px solid var(--line);
+}
+.faq summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 19px 0;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  list-style: none;
+}
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::marker { content: none; }
+.faq summary .mark {
+  font: 500 1.125rem var(--mono);
+  color: var(--accent);
+  line-height: 1;
+  transition: transform 160ms ease-out;
+  flex-shrink: 0;
+}
+.faq details[open] summary .mark { transform: rotate(45deg); }
+.faq .answer { padding: 0 0 22px; }
+.faq .answer p {
+  margin: 0 0 0.75em;
+  color: var(--ink-soft);
+  max-width: 62ch;
+}
+.faq .answer p:last-child { margin-bottom: 0; }
+
+/* ---------- footer ---------- */
+
+.footer {
+  margin-top: 88px;
+  border-top: 1px solid var(--line);
+  padding: 30px 0 48px;
+}
+.footer .wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px 28px;
+}
+.footer .tag {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.9375rem;
+}
+.footer .spacer { flex: 1; }
+.footer .footer-app {
+  font-size: 0.9375rem;
+  font-weight: 500;
+}
+.footer small { font-size: 0.8125rem; }
+
+@media (max-width: 479px) {
+  .footer .wrap { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .footer .spacer { display: none; }
+}

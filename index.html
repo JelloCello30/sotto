@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sotto — silent speech input for your browser</title>
+  <meta name="description" content="Sotto watches your mouth through your camera and types the phrases you silently mouth at it. On-device, no audio, no cloud. A research preview.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FAF7F2">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#131110">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/styles.css">
+  <link rel="stylesheet" href="css/landing.css">
+  <script type="module" src="js/landing.js"></script>
+  <script>
+    if ('serviceWorker' in navigator
+        && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+      addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+    }
+  </script>
+</head>
+<body>
+
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="wrap">
+    <nav class="nav" aria-label="Primary">
+      <a class="wordmark" href="index.html">sotto<span class="dot">.</span></a>
+      <span class="badge-preview">Research preview</span>
+      <span class="spacer"></span>
+      <a class="navlink" href="#how">How it works</a>
+      <a class="navlink" href="#install">Install</a>
+      <a class="navlink" href="#faq">FAQ</a>
+      <a class="btn-accent btn-sm" href="app.html">Open the app</a>
+    </nav>
+  </header>
+
+  <main id="main">
+
+    <!-- ============ hero ============ -->
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <h1 id="hero-title">Type with your lips, not your fingers.</h1>
+        <p class="lede">Sotto watches your mouth through your camera and types the phrases you silently mouth at it. It runs on-device in your browser — no audio captured, no cloud involved.</p>
+        <div class="hero-ctas">
+          <a class="btn-accent" href="app.html">Try the live demo</a>
+          <a class="btn-ghost" href="#how">See how it works</a>
+        </div>
+        <p class="soft hero-note">Runs entirely in your browser. Nothing leaves your machine.</p>
+      </div>
+      <div class="hero-art">
+        <div class="lipwave" data-lipwave data-bars="48" aria-hidden="true"></div>
+        <p class="mono soft lipwave-caption" aria-hidden="true">decorative signal — the app draws a real one</p>
+      </div>
+    </section>
+
+    <!-- ============ honesty strip ============ -->
+    <aside class="honesty" aria-label="What Sotto is and is not">
+      <div class="wrap">
+        <span class="tick" aria-hidden="true">n.b.</span>
+        <p class="soft">Sotto reads a vocabulary you teach it — phrases today, not free dictation. We'd rather show you something real that works now than promise something that doesn't exist yet.</p>
+      </div>
+    </aside>
+
+    <!-- ============ how it works ============ -->
+    <section id="how" class="section wrap" aria-labelledby="how-title">
+      <p class="kicker">How it works</p>
+      <h2 id="how-title">Three steps, no magic.</h2>
+      <ol class="ledger">
+        <li>
+          <span class="num" aria-hidden="true">01</span>
+          <h3>Calibrate</h3>
+          <p>Silently mouth each phrase a few times. Sotto stores the motion pattern — a few hundred numbers — not the video. Your library lives in your browser and nowhere else.</p>
+        </li>
+        <li>
+          <span class="num" aria-hidden="true">02</span>
+          <h3>Mouth it</h3>
+          <p>When your lips start moving, Sotto notices, and cuts the utterance out of the stream on its own. No button to hold, no wake word — there is no audio to wake to.</p>
+        </li>
+        <li>
+          <span class="num" aria-hidden="true">03</span>
+          <h3>It types</h3>
+          <p>The closest phrase in your library lands in the pad with a confidence score attached. Turn on auto-copy and it goes straight to your clipboard.</p>
+        </li>
+      </ol>
+      <p class="soft pipeline">The pipeline, precisely: <span class="mono">MediaPipe Face Landmarker</span> (478 landmarks and 52 blendshapes per frame, entirely on-device) → 22 mouth features per frame → utterance segmentation by motion energy → <span class="mono">DTW</span> template matching against your calibrated phrases. No lipreading neural net, no server. That is the entire trick, and it is enough.</p>
+    </section>
+
+    <!-- ============ app mockup ============ -->
+    <section class="section" aria-labelledby="mock-title">
+      <div class="wrap">
+        <p class="kicker">The app</p>
+        <h2 id="mock-title">What you'll be looking at.</h2>
+        <div class="mock card" role="img" aria-label="Illustration of the Sotto app: a camera panel with a live listening status and a lip-activity strip, next to a transcript pad holding matched phrases with confidence scores.">
+          <div class="mock-grid">
+            <div class="mock-cam">
+              <div class="mock-view">
+                <span class="pill is-live mock-pill"><span class="dot-ind"></span>listening</span>
+                <span class="mock-tag">on-device</span>
+                <span class="mock-oval"></span>
+                <span class="mock-mouth"></span>
+                <span class="lmk" style="--x: 36%; --y: 55%;"></span>
+                <span class="lmk" style="--x: 64%; --y: 55%;"></span>
+                <span class="lmk" style="--x: 50%; --y: 50%;"></span>
+                <span class="lmk" style="--x: 50%; --y: 62%;"></span>
+                <span class="lmk" style="--x: 42%; --y: 51%;"></span>
+                <span class="lmk" style="--x: 58%; --y: 51%;"></span>
+                <span class="lmk" style="--x: 42%; --y: 61%;"></span>
+                <span class="lmk" style="--x: 58%; --y: 61%;"></span>
+              </div>
+              <div class="lipwave lipwave--strip" data-lipwave data-bars="36"></div>
+            </div>
+            <div class="mock-pad">
+              <div class="mock-pad-head">
+                <span class="mock-pad-title">Pad</span>
+                <span class="pill">auto-copy on</span>
+              </div>
+              <div class="mock-row">
+                <span class="mock-phrase">on my way</span>
+                <span class="mock-meta"><span class="mock-t">just now</span><span class="pill is-good"><span class="dot-ind"></span>0.92</span></span>
+              </div>
+              <div class="mock-row">
+                <span class="mock-phrase">give me a minute</span>
+                <span class="mock-meta"><span class="mock-t">14s ago</span><span class="pill is-good"><span class="dot-ind"></span>0.84</span></span>
+              </div>
+              <div class="mock-row">
+                <span class="mock-phrase soft">no match — below threshold</span>
+                <span class="mock-meta"><span class="mock-t">31s ago</span><span class="pill is-warn"><span class="dot-ind"></span>0.41</span></span>
+              </div>
+              <div class="mock-row mock-row-caret">
+                <span class="mock-caret" aria-hidden="true"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="soft mock-caption">Drawn in CSS, not screenshotted — but this is the actual layout, down to the honest "no match" rows. The working version is one click away.</p>
+      </div>
+    </section>
+
+    <!-- ============ install ============ -->
+    <section id="install" class="section wrap" aria-labelledby="install-title">
+      <p class="kicker">Install</p>
+      <h2 id="install-title">Install on any device.</h2>
+      <p class="install-lede">Sotto is a web app that installs like a native one. No store, no installer, no account — Chrome, Edge, and Safari all know how. (Firefox can use it in a tab; it just doesn't do installing.)</p>
+
+      <div class="tabs" data-tabs>
+        <div class="tablist" role="tablist" aria-label="Install instructions by platform">
+          <button class="tab" role="tab" id="tab-macos" aria-controls="panel-macos" aria-selected="true" data-platform="macos" type="button">macOS</button>
+          <button class="tab" role="tab" id="tab-windows" aria-controls="panel-windows" aria-selected="false" tabindex="-1" data-platform="windows" type="button">Windows</button>
+          <button class="tab" role="tab" id="tab-linux" aria-controls="panel-linux" aria-selected="false" tabindex="-1" data-platform="linux" type="button">Linux</button>
+          <button class="tab" role="tab" id="tab-ios" aria-controls="panel-ios" aria-selected="false" tabindex="-1" data-platform="ios" type="button">iPhone &amp; iPad</button>
+          <button class="tab" role="tab" id="tab-android" aria-controls="panel-android" aria-selected="false" tabindex="-1" data-platform="android" type="button">Android</button>
+        </div>
+
+        <div class="tabpanel" role="tabpanel" id="panel-macos" aria-labelledby="tab-macos">
+          <ul class="steps">
+            <li>Chrome or Edge — click the install icon at the right end of the address bar, then choose <span class="mono">Install</span>.</li>
+            <li>Safari 17 or newer — <span class="mono">File</span> menu, then <span class="mono">Add to Dock</span>.</li>
+          </ul>
+        </div>
+        <div class="tabpanel" role="tabpanel" id="panel-windows" aria-labelledby="tab-windows" hidden>
+          <ul class="steps">
+            <li>Chrome or Edge — click the install icon in the address bar, then choose <span class="mono">Install</span>. That is the whole procedure.</li>
+          </ul>
+        </div>
+        <div class="tabpanel" role="tabpanel" id="panel-linux" aria-labelledby="tab-linux" hidden>
+          <ul class="steps">
+            <li>Chromium, Chrome, or Edge — click the install icon in the address bar. The result behaves like any other desktop app, launcher entry included.</li>
+          </ul>
+        </div>
+        <div class="tabpanel" role="tabpanel" id="panel-ios" aria-labelledby="tab-ios" hidden>
+          <ul class="steps">
+            <li>Open Sotto in Safari, tap the <span class="mono">Share</span> button, then <span class="mono">Add to Home Screen</span>. It launches full-screen and asks for the camera the first time you calibrate.</li>
+          </ul>
+        </div>
+        <div class="tabpanel" role="tabpanel" id="panel-android" aria-labelledby="tab-android" hidden>
+          <ul class="steps">
+            <li>In Chrome, open the browser menu and choose <span class="mono">Add to Home screen</span> — on recent versions it is labeled <span class="mono">Install app</span>.</li>
+          </ul>
+        </div>
+      </div>
+
+      <p class="soft install-req">You need a camera and a modern browser. After the first load, Sotto works offline.</p>
+      <p class="soft install-note">Native apps that type system-wide are on the roadmap. They have not shipped, and this page will not pretend otherwise.</p>
+    </section>
+
+    <!-- ============ faq ============ -->
+    <section id="faq" class="section wrap" aria-labelledby="faq-title">
+      <p class="kicker">FAQ</p>
+      <h2 id="faq-title">Fair questions.</h2>
+      <div class="faq">
+        <details>
+          <summary>Does this replace my keyboard?<span class="mark" aria-hidden="true">+</span></summary>
+          <div class="answer">
+            <p>No. Today Sotto types phrases you have taught it — a calibrated vocabulary, not free dictation. Open-vocabulary lipreading is an unsolved research problem: the best published systems, trained on enormous curated datasets, still miss roughly a quarter of the words. From a webcam, in your kitchen lighting, it is harder still. We would rather hand you thirty phrases that work than a keyboard that guesses.</p>
+          </div>
+        </details>
+        <details>
+          <summary>Is audio recorded?<span class="mark" aria-hidden="true">+</span></summary>
+          <div class="answer">
+            <p>No. Sotto never requests microphone permission, so your browser cannot hand it audio even by accident. Video frames are processed on-device by the face landmarker and discarded; what persists is a small set of motion numbers per phrase, stored in your browser. Nothing is uploaded, because there is nowhere to upload it to.</p>
+          </div>
+        </details>
+        <details>
+          <summary>Why do I have to calibrate?<span class="mark" aria-hidden="true">+</span></summary>
+          <div class="answer">
+            <p>Because lips underdetermine speech. Many sounds are made in the throat or with the tongue and look identical from the outside — mouth "pat", "bat", and "mat" at a mirror and watch. A personal template vocabulary turns an impossible guessing game into a tractable one: Sotto only has to decide which of your phrases you mouthed, on your face, in your light. That constraint is what makes it reliable.</p>
+          </div>
+        </details>
+        <details>
+          <summary>What's the roadmap?<span class="mark" aria-hidden="true">+</span></summary>
+          <div class="answer">
+            <p>Bigger vocabularies with faster calibration. Phoneme-level decoding experiments, labeled as experiments. A native macOS helper that can type into any application, not just this one. In that order — and nothing gets announced here until it runs.</p>
+          </div>
+        </details>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ============ footer ============ -->
+  <footer class="footer">
+    <div class="wrap">
+      <a class="wordmark" href="index.html">sotto<span class="dot">.</span></a>
+      <p class="tag">Made for quiet rooms, loud cafés, and resting voices.</p>
+      <span class="spacer"></span>
+      <a class="footer-app" href="app.html">Open the app</a>
+      <small>Research preview — v0.1</small>
+    </div>
+  </footer>
+
+</body>
+</html>

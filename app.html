@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sotto. — the pad</title>
+  <meta name="description" content="Sotto research preview. Calibrated silent-phrase input: teach it a phrase, mouth it at the camera, it types it. On-device, no audio.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#FAF7F2" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#131110" media="(prefers-color-scheme: dark)">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/styles.css">
+  <link rel="stylesheet" href="css/app.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#pad">Skip to the pad</a>
+
+  <header class="wrap">
+    <nav class="nav app-nav" aria-label="Primary">
+      <a class="wordmark" href="index.html">sotto<span class="dot">.</span></a>
+      <span class="badge-preview">Research preview</span>
+      <span class="spacer"></span>
+      <span class="pill" id="status" role="status">
+        <span class="dot-ind"></span>
+        <span id="status-text">camera off</span>
+      </span>
+      <button class="btn-ghost btn-sm" id="settings-btn" aria-expanded="false" aria-controls="settings-drawer">Settings</button>
+    </nav>
+  </header>
+
+  <main class="wrap app-main" id="main">
+    <h1 class="visually-hidden">Sotto — silent phrase input</h1>
+
+    <!-- ============ camera column (5/12) ============ -->
+    <section class="col-cam" aria-labelledby="cam-h">
+      <h2 class="visually-hidden" id="cam-h">Camera</h2>
+
+      <div class="card cam-card">
+        <div class="cam-frame" id="cam-frame">
+          <video id="cam" muted playsinline autoplay aria-label="Live camera view, mirrored"></video>
+
+          <span class="pill cam-pill" id="cam-pill">
+            <span class="dot-ind"></span>
+            <span id="cam-pill-text">camera off</span>
+          </span>
+
+          <canvas id="lipwave" class="lipwave" role="img" aria-label="Live mouth-openness signal, most recent four seconds"></canvas>
+          <span class="cam-fps soft" id="fps" hidden></span>
+
+          <div class="cam-note" id="cam-note" hidden>
+            Face lost. Center yourself in the frame — even light helps.
+          </div>
+
+          <div class="cam-empty" id="cam-empty">
+            <div class="bars" aria-hidden="true"><span></span><span></span><span></span></div>
+            <h3 id="cam-empty-title">Camera is off</h3>
+            <p class="soft" id="cam-empty-body">Sotto reads lip movement through your camera. Frames are processed on this device and discarded. No audio, no uploads.</p>
+            <button class="btn" id="cam-empty-btn">Start camera</button>
+          </div>
+
+          <div class="toast-region" id="toast-region" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <div class="cam-controls">
+        <button class="btn" id="cam-toggle">Start camera</button>
+        <div class="ctl">
+          <label for="sensitivity">Sensitivity</label>
+          <input type="range" id="sensitivity" min="0" max="1" step="0.01" value="0.5"
+                 aria-describedby="sens-hint">
+          <output class="mono-num" id="sens-out" for="sensitivity">0.50</output>
+        </div>
+        <span class="visually-hidden" id="sens-hint">Higher accepts looser matches, lower demands closer ones.</span>
+        <label class="switch">
+          <input type="checkbox" id="pause-toggle">
+          <span class="track" aria-hidden="true"></span>
+          <span class="switch-label">Pause matching</span>
+        </label>
+      </div>
+
+      <aside class="card practice" aria-labelledby="practice-h">
+        <div class="practice-head">
+          <h3 id="practice-h">Practice mode</h3>
+          <label class="switch">
+            <input type="checkbox" id="practice-toggle">
+            <span class="track" aria-hidden="true"></span>
+            <span class="switch-label">On</span>
+          </label>
+        </div>
+        <div id="practice-panel" hidden>
+          <p class="soft practice-hint">After each utterance: the five closest phrases, ranked. Near-misses included — that is the point.</p>
+          <ol class="practice-list" id="practice-list"></ol>
+          <p class="soft" id="practice-empty">Mouth something and the ranking appears here.</p>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ============ workspace column (7/12) ============ -->
+    <section class="col-work" aria-labelledby="pad-h">
+
+      <div class="card pad-card">
+        <div class="pad-head">
+          <h2 id="pad-h">The pad</h2>
+          <div class="pad-actions">
+            <label class="switch">
+              <input type="checkbox" id="autocopy-toggle">
+              <span class="track" aria-hidden="true"></span>
+              <span class="switch-label">Auto-copy each match</span>
+            </label>
+            <button class="btn-ghost btn-sm" id="copy-btn">Copy all</button>
+            <button class="btn-ghost btn-sm" id="clear-btn">Clear</button>
+          </div>
+        </div>
+        <textarea id="pad" class="pad" rows="4" spellcheck="false"
+                  placeholder="Matched phrases land here."
+                  aria-label="The pad. Matched phrases are appended here."></textarea>
+      </div>
+
+      <div class="card book-card">
+        <div class="book-head">
+          <h2 id="book-h">Phrasebook</h2>
+          <div class="book-actions">
+            <button class="btn-accent btn-sm" id="add-phrase-btn">Add phrase</button>
+            <button class="btn-ghost btn-sm" id="export-btn">Export</button>
+            <button class="btn-ghost btn-sm" id="import-btn">Import</button>
+            <input type="file" id="import-file" accept="application/json,.json" hidden
+                   aria-label="Import a phrasebook JSON file">
+          </div>
+        </div>
+        <p class="soft book-note">Sotto only knows the phrases you teach it. Three silent takes each.</p>
+        <ul class="phrase-list" id="phrase-list" aria-labelledby="book-h"></ul>
+        <p class="soft" id="book-empty">Nothing here yet. Add a phrase, or start the camera and take the starter pack.</p>
+      </div>
+
+    </section>
+  </main>
+
+  <p class="wrap app-foot soft">No audio is captured. The camera feed, the model, and your phrasebook stay on this device.</p>
+
+  <!-- ============ settings drawer ============ -->
+  <aside class="card drawer" id="settings-drawer" aria-labelledby="settings-h" hidden>
+    <div class="drawer-head">
+      <h3 id="settings-h">Settings</h3>
+      <button class="btn-ghost btn-sm" id="settings-close">Close</button>
+    </div>
+
+    <div class="drawer-block">
+      <h4>Pipeline self-test</h4>
+      <p class="soft">Feeds one synthetic mouth-movement segment through the segmenter and matcher. No camera involved, nothing gets calibrated, and the result is labeled as what it is.</p>
+      <button class="btn-ghost" id="selftest-btn">Run pipeline self-test (simulated input)</button>
+      <div class="selftest-out" id="selftest-out" role="status" aria-live="polite" hidden>
+        <span class="pill is-warn"><span class="dot-ind"></span>SIMULATED</span>
+        <span id="selftest-msg"></span>
+      </div>
+    </div>
+
+    <hr class="rule">
+
+    <div class="drawer-block">
+      <h4>Starter pack</h4>
+      <p class="soft">Six everyday phrases, guided calibration, about two minutes. Offered automatically when the book is empty; run it again any time.</p>
+      <button class="btn-ghost" id="starter-btn">Run starter calibration</button>
+    </div>
+
+    <hr class="rule">
+
+    <p class="soft drawer-foot">Everything runs on this device. The phrasebook lives in your browser's local storage — Export is the backup.</p>
+  </aside>
+
+  <!-- ============ calibration dialog ============ -->
+  <dialog class="card cal-dialog" id="cal-dialog" aria-label="Calibration">
+
+    <section class="cal-step" id="cal-step-offer" hidden>
+      <h3>Teach it six phrases</h3>
+      <p>The book is empty. Sotto matches only what it has seen you mouth, so the demo starts with a short calibration: six everyday phrases, three silent takes each. About two minutes.</p>
+      <p class="soft cal-list">hello &middot; yes &middot; no &middot; thank you &middot; on my way &middot; send it</p>
+      <div class="cal-actions">
+        <button class="btn-accent" id="cal-offer-start">Start the six</button>
+        <button class="btn-ghost" id="cal-offer-later">I'll add my own</button>
+      </div>
+    </section>
+
+    <section class="cal-step" id="cal-step-camera" hidden>
+      <h3>Camera first</h3>
+      <p class="soft" id="cal-camera-body">Calibration records real takes, which needs the camera running. Nothing leaves this device.</p>
+      <div class="cal-actions">
+        <button class="btn" id="cal-cam-start">Start camera</button>
+        <button class="btn-ghost" id="cal-cam-close">Close</button>
+      </div>
+    </section>
+
+    <section class="cal-step" id="cal-step-label" hidden>
+      <h3>New phrase</h3>
+      <label class="cal-field-label" for="cal-label-input">Label — what the pad types (sentence-cased automatically)</label>
+      <input type="text" id="cal-label-input" class="cal-input" maxlength="40"
+             autocomplete="off" placeholder="e.g. be right back">
+      <p class="cal-error" id="cal-label-error" role="alert" hidden></p>
+      <div class="cal-actions">
+        <button class="btn-accent" id="cal-begin-btn">Begin takes</button>
+        <button class="btn-ghost" id="cal-label-cancel">Cancel</button>
+      </div>
+    </section>
+
+    <section class="cal-step" id="cal-step-record" hidden>
+      <p class="soft cal-kicker" id="cal-progress" hidden>Phrase 1 of 6</p>
+      <h3 class="cal-prompt">Silently mouth <q id="cal-word">hello</q> now</h3>
+      <p class="cal-live" id="cal-live" aria-live="polite">Watching — mouth it when ready.</p>
+      <div class="take-row">
+        <span class="take-dots" id="cal-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span class="soft" id="cal-take-text" aria-live="polite">take 1 of 3</span>
+      </div>
+      <div class="cal-actions">
+        <button class="btn-ghost btn-sm" id="cal-redo" disabled>Redo last take</button>
+        <button class="btn-ghost btn-sm" id="cal-skip" hidden>Skip this phrase</button>
+        <button class="btn-ghost btn-sm" id="cal-cancel">Cancel</button>
+      </div>
+    </section>
+
+    <section class="cal-step" id="cal-step-done" hidden>
+      <h3 id="cal-done-title">Learned</h3>
+      <p id="cal-done-msg"></p>
+      <div class="cal-actions">
+        <button class="btn-accent" id="cal-next-btn">Done</button>
+      </div>
+    </section>
+
+  </dialog>
+</body>
+</html>

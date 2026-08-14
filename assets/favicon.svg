@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Sotto">
+  <!-- Transparent ground; fixed colors chosen to read on both light and dark tab bars. -->
+  <rect x="2" y="4" width="28" height="6" rx="3" fill="#78716C"/>
+  <rect x="2" y="13" width="20" height="6" rx="3" fill="#78716C"/>
+  <rect x="2" y="22" width="12" height="6" rx="3" fill="#C2410C"/>
+</svg>

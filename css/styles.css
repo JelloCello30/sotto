@@ -1,0 +1,159 @@
+/* Sotto — shared design tokens + core components. See DESIGN.md. */
+
+@font-face {
+  font-family: 'InterVariable';
+  src: url('../vendor/inter/inter-var.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --paper: #FAF7F2;
+  --ink: #1C1917;
+  --ink-soft: #57534E;
+  --line: #E7E0D6;
+  --card: #FFFFFF;
+  --accent: #C2410C;
+  --accent-ink: #FFF7ED;
+  --good: #3F6212;
+  --warn: #A16207;
+  --bad: #9F1239;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+  --radius: 12px;
+  --radius-ctl: 8px;
+  --font: 'InterVariable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #131110;
+    --ink: #EDE7DE;
+    --ink-soft: #A8A29E;
+    --line: #2B2724;
+    --card: #1C1917;
+    --accent: #F97316;
+    --accent-ink: #1C0A00;
+    --good: #A3E635;
+    --warn: #FBBF24;
+    --bad: #FB7185;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* The hidden attribute must always win, including over display rules on
+   component classes (.btn-ghost etc.) — see review finding on .cam-empty. */
+[hidden] { display: none !important; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font);
+  font-optical-sizing: auto;
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 { margin: 0 0 0.5em; }
+h1 { font-size: clamp(2.4rem, 6vw, 4.2rem); font-weight: 640; line-height: 1.04; letter-spacing: -0.035em; }
+h2 { font-size: clamp(1.6rem, 3vw, 2rem); font-weight: 620; letter-spacing: -0.02em; line-height: 1.2; }
+h3 { font-size: 1.125rem; font-weight: 600; letter-spacing: -0.01em; }
+p  { margin: 0 0 1em; }
+a  { color: var(--ink); text-decoration-color: var(--line); text-underline-offset: 3px; }
+a:hover { text-decoration-color: var(--accent); }
+small, .soft { color: var(--ink-soft); }
+
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+@media (min-width: 900px) { .wrap { padding: 0 48px; } }
+
+/* ---------- nav ---------- */
+.nav {
+  display: flex; align-items: center; gap: 16px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+}
+.nav .spacer { flex: 1; }
+.nav a.navlink {
+  text-decoration: none; color: var(--ink-soft);
+  font-size: 0.9375rem; font-weight: 500; padding: 6px 10px; border-radius: 6px;
+}
+.nav a.navlink:hover { color: var(--ink); background: var(--line); }
+
+.wordmark {
+  font-weight: 650; letter-spacing: -0.04em; font-size: 1.375rem;
+  text-decoration: none; color: var(--ink);
+}
+.wordmark .dot { color: var(--accent); }
+
+.badge-preview {
+  font-size: 0.71875rem; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--ink-soft);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 3px 10px; white-space: nowrap;
+}
+
+/* ---------- buttons ---------- */
+.btn, .btn-accent, .btn-ghost {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  font: 600 0.9375rem/1 var(--font);
+  letter-spacing: -0.01em;
+  padding: 13px 22px; border-radius: var(--radius-ctl);
+  border: 1px solid transparent; cursor: pointer; text-decoration: none;
+  transition: transform 160ms ease-out, opacity 160ms ease-out, background 160ms ease-out;
+  user-select: none;
+}
+.btn { background: var(--ink); color: var(--paper); }
+.btn-accent { background: var(--accent); color: var(--accent-ink); }
+.btn-ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+.btn:hover, .btn-accent:hover { opacity: 0.88; }
+.btn-ghost:hover { background: var(--card); border-color: var(--ink-soft); }
+.btn:active, .btn-accent:active, .btn-ghost:active { transform: translateY(1px); }
+.btn[disabled], .btn-accent[disabled], .btn-ghost[disabled] { opacity: 0.45; cursor: not-allowed; }
+
+/* ---------- surfaces ---------- */
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.pill {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 0.8125rem; font-weight: 600;
+  padding: 5px 12px; border-radius: 999px;
+  background: var(--card); border: 1px solid var(--line); color: var(--ink-soft);
+}
+.pill .dot-ind { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-soft); }
+.pill.is-good .dot-ind { background: var(--good); }
+.pill.is-warn .dot-ind { background: var(--warn); }
+.pill.is-bad  .dot-ind { background: var(--bad); }
+.pill.is-live .dot-ind { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+.kbd {
+  font: 500 0.8125rem var(--mono);
+  background: var(--card); border: 1px solid var(--line); border-bottom-width: 2px;
+  border-radius: 6px; padding: 2px 7px;
+}
+
+hr.rule { border: 0; border-top: 1px solid var(--line); margin: 0; }
+
+/* ---------- misc ---------- */
+::selection { background: var(--accent); color: var(--accent-ink); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
