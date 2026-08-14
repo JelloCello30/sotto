@@ -11,7 +11,7 @@
  *   - Old sotto-* caches are deleted on activate.
  */
 
-const CACHE = 'sotto-v3';
+const CACHE = 'sotto-v4';
 
 const PRECACHE = [
   './',

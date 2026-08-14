@@ -2,31 +2,31 @@
 
 *sotto voce* — under the voice.
 
-Sotto is a quiet-speech input instrument with two modes:
+Sotto is a quiet-speech input instrument with one flow. Start it, then speak,
+whisper, or mouth in silence: per utterance, Sotto routes on its own. A phrase
+it recognizes types instantly from lip movement alone; anything it can hear is
+transcribed by a vendored Whisper model on-device. And while you speak, it
+learns — the lip motion of short spoken phrases is enrolled under their
+transcripts, so your silent vocabulary grows without a calibration session.
 
-- **Phrase mode** (the default): calibrated silent-phrase input. You mouth
-  phrases you have taught it; it types them from lip movement alone. Camera
-  only — the microphone is never requested.
-- **Whisper mode** (new in v0.2): open-vocabulary dictation. You whisper (or
-  speak), and a vendored Whisper model transcribes it on-device, with your lip
-  movement deciding when the microphone is worth listening to.
+Everything runs in your browser, on your machine. Nothing is uploaded.
 
-Everything runs in your browser, on your machine. Nothing is uploaded in either
-mode.
-
-It is a **research preview**, and it is honest about what that means. Phrase
-mode is vocabulary-bound: it recognizes the phrases you taught it, and only
-those, but it does so in complete silence. Whisper mode is open-vocabulary, but
-it is not lipreading: the audio decides *what* you said; the lips only decide
-*when* to listen. Within those constraints, both work, and they are quietly
-satisfying to use.
+It is a **research preview**, and it is honest about what that means. In
+silence, Sotto recognizes exactly the phrases it has been taught or has heard
+you say — a list that grows as you speak, but a list. Arbitrary never-heard
+silent speech is not readable by Sotto or by anyone else; open-vocabulary
+silent lipreading does not exist yet. With at least a whisper, the vocabulary
+is open. Within those constraints it works, and it is quietly satisfying to
+use.
 
 ## How it works
 
 The whole pipeline runs in your browser, on your device:
 
-1. **Camera.** `getUserMedia` video only. In Phrase mode the microphone is
-   never requested.
+1. **Camera, and usually a microphone.** `getUserMedia` video first. If voice
+   assist is on (it is by default), the microphone starts after the camera is
+   running — never before a user gesture, and never on a page-load restore.
+   Deny or disable the mic and Sotto carries on camera-only.
 2. **Face tracking.** A vendored copy of MediaPipe Tasks Vision (`FaceLandmarker`,
    WASM) tracks one face per frame, GPU delegate with CPU fallback.
 3. **Features.** Each frame is reduced to a 22-dimensional vector: 18
@@ -36,22 +36,64 @@ The whole pipeline runs in your browser, on your device:
    the camera.
 4. **Segmentation.** Frame-to-frame feature energy, smoothed and run through an
    on/off hysteresis, cuts the stream into utterance segments: mouth starts
-   moving, mouth stops moving, that was a phrase.
-5. **Matching.** Each segment is resampled to 32 frames and compared against your
-   recorded templates with dynamic time warping (Sakoe-Chiba band). A phrase is
-   accepted only if the best match is close enough *and* clearly ahead of the
-   runner-up. Otherwise Sotto says nothing, which is the correct thing to say.
-6. **Output.** The matched phrase is typed into the composer. Your phrase library
-   lives in `localStorage` and can be exported and imported as JSON.
-7. **Whisper branch (Whisper mode only).** The same segmentation timestamps clip
-   a padded window from a rolling in-memory microphone buffer; the clipped audio
-   is transcribed by a local Whisper model in a worker, and the text lands in
-   the composer verbatim. Template matching (step 5) is bypassed in this mode.
+   moving, mouth stops moving, that was an utterance. Each segment also carries
+   its mean audio level, so routing knows whether it was voiced or silent.
+5. **Matching.** Every segment is resampled to 32 frames and compared against
+   your phrase library — taught and learned alike — with dynamic time warping
+   (Sakoe-Chiba band). A phrase is accepted only if the best match is close
+   enough *and* clearly ahead of the runner-up.
+6. **Routing.** What happens next is decided per utterance (rules below): type
+   the matched phrase, hand the audio to Whisper, or say nothing.
+7. **Whisper branch.** For voiced utterances, the segmentation timestamps clip
+   a padded window from a rolling in-memory microphone buffer; the clipped
+   audio is transcribed by a local Whisper model in a worker, and the text
+   streams into the composer as it is recognized.
+8. **Output.** Typed text lands in the composer. Your phrase library lives in
+   `localStorage` and can be exported and imported as JSON.
 
-## Whisper mode
+## Routing, stated plainly
 
-Phrase mode's constraint is its vocabulary. Whisper mode removes it, at an
-honestly stated price: it needs to hear you, at least a little.
+Per utterance, in order:
+
+1. If a calibration recording is pending, the segment is a take — exactly the
+   manual-teaching flow.
+2. If the library matches with confidence at or above 0.80, the phrase types
+   immediately — about 10 ms — whether you were silent or audible. Nothing is
+   sent to the speech model, and the phrase's last-used time is updated.
+3. Otherwise, if the segment was audible, voice assist is on, and the speech
+   model is ready, the clipped audio goes to Whisper and the transcript types
+   as it streams — about a second per utterance once warm.
+4. Otherwise — silent, and no confident match — nothing types. A brief hint in
+   the ticker suggests whispering it once so Sotto can learn it. A
+   low-confidence match never types in this branch: wrong words are worse than
+   a hint.
+
+## Auto-learning
+
+Say it once, mouth it later. After Whisper delivers a final transcript for an
+utterance, Sotto enrolls that utterance's lip frames as a silent template — the
+audio supervises the visual templates, entirely on-device. Guards, all of which
+must hold:
+
+- The text, stripped of surrounding punctuation and lowercased, is 1–4 words
+  and 2–40 characters, made only of letters, digits, apostrophes, hyphens, and
+  spaces — no URLs, no symbols.
+- The segment ran 400–3000 ms. Split pieces of a long utterance qualify on
+  their own text and their own frames.
+- The transcript actually landed in the pad (not paused, not a stale session).
+- If a phrase with that label already exists — taught or learned — the frames
+  are added as an extra take; at the 8-take cap the oldest take is evicted.
+- At most 40 learned phrases, 60 phrases total. Past the cap, the least
+  recently used learned phrase is evicted first; a calibrated phrase is never
+  evicted to make room for a learned one. If the library is full of taught
+  phrases, learning skips silently.
+- The first time a label is learned you get one toast; added takes are silent,
+  and learn toasts are throttled to at most one per 10 seconds.
+
+Learned phrases show a small "learned" pill in the phrasebook, and manual
+teaching stays available for phrases you would rather never say out loud.
+
+## Voice assist
 
 **What it is.** Open-vocabulary dictation, transcribed by a vendored copy of
 OpenAI's Whisper (quantized ONNX encoder and decoder plus tokenizer, under
@@ -62,16 +104,16 @@ ship with the site, so no network is involved at any point.
 **The fusion design.** A microphone alone would transcribe everything — your
 podcast, your officemate, the television. So the lip tracker gates it. Audio is
 captured through an AudioWorklet into a rolling 30-second ring buffer at 16kHz
-(raw PCM, in memory, never persisted). When the v0.1 engine's segmentation sees
+(raw PCM, in memory, never persisted). When the engine's segmentation sees
 *your* mouth start and stop moving, that utterance's time window — padded a
 quarter second on each side — is clipped from the buffer and handed to the
 model. Long utterances are not cut off: past about six seconds the segment is
 split, the finished piece goes off to decode, and the next begins without
 dropping a frame, so a long thought arrives in pieces instead of not at all.
-(Phrase-mode calibration takes stay bounded — a take that runs past the limit
-is still discarded, on purpose.) Speech that happens while your mouth is still
-is never transcribed. The lips decide *when*; the audio decides *what*. It is
-sensor fusion, not lipreading.
+(Long silent mouthing splits the same way; calibration takes stay bounded — a
+take that runs past the limit is still discarded, on purpose.) Speech that
+happens while your mouth is still is never transcribed. The lips decide *when*;
+the audio decides *what*. It is sensor fusion, not lipreading.
 
 **Cost.** The speech model (Whisper base.en, 8-bit ONNX) is a one-time download
 of roughly 75MB, precached by the service worker like everything else. Measured
@@ -89,10 +131,12 @@ settles; Sotto remembers the verdict, so repeat visits skip the detour and the
 model is ready in about 4 to 6 seconds. Inference runs in a module worker, so
 the interface stays responsive throughout.
 
-**Switching.** The mode control lives in the app's camera column, and the
-choice persists. Leaving Whisper mode releases the microphone immediately — the
-browser's mic indicator turns off with it. The speech model stays loaded so
-switching back is instant.
+**The switch.** Voice assist is one switch in the settings drawer, on by
+default. Turning it off releases the microphone immediately — the browser's
+mic indicator turns off with it — and Sotto continues camera-only: silent
+phrases keep working. The speech model stays loaded, so turning it back on is
+quick. If the mic is denied or disconnects mid-session, voice assist drops to
+off on its own and the app tells you; the camera flow is unaffected.
 
 ## Running it
 
@@ -151,49 +195,52 @@ sotto/
 ├── DESIGN.md                design system and voice
 ├── SPEC.md                  v0.1 engine specification
 ├── SPEC-V2.md               v0.2 Whisper mode specification
-└── SPEC-V3.md               v0.3 fast-feel specification
+├── SPEC-V3.md               v0.3 fast-feel specification
+└── SPEC-V4.md               v0.4 unified-mode specification
 ```
 
 ## Privacy
 
-Short, and stated per mode.
+Short, and stated per mic state.
 
-Both modes:
+Always:
 
 - Everything runs on-device. Video frames are processed in memory and discarded.
 - No network requests after load. Fonts, models, and WASM are all vendored —
   there are no CDNs, no analytics, no telemetry, no accounts.
-- Your phrase library is stored in your browser's `localStorage` and goes
-  nowhere unless you export it yourself.
+- Your phrase library — taught and learned alike — is stored in your browser's
+  `localStorage` and goes nowhere unless you export it yourself.
 
-Phrase mode:
+Voice assist on (the default):
 
-- No audio, ever. The microphone permission is never requested, so the browser
-  has nothing to hand over.
+- The microphone is live. Audio sits in a 30-second in-memory ring buffer, and
+  clipped utterances are transcribed on this device by the local model. Nothing
+  is written to disk, stored, or uploaded — there is no server in the pipeline.
 
-Whisper mode:
+Voice assist off (or mic blocked):
 
-- The microphone is live while the mode is on. Audio sits in a 30-second
-  in-memory ring buffer, and clipped utterances are transcribed on this device
-  by the local model. Nothing is written to disk, stored, or uploaded — there
-  is no server in the pipeline. Switching back to Phrase mode stops the
-  microphone immediately.
+- Camera only. The microphone is off — released the instant the switch flips —
+  and silent phrases still work.
 
 ## Current limitations
 
 Stated plainly, because they are real:
 
-- **Phrase mode is calibrated vocabulary only.** It recognizes phrases you have
-  taught it — up to 60 phrases with up to 8 takes each. It cannot transcribe
-  arbitrary speech; that is what Whisper mode is for, and Whisper mode needs
-  sound.
-- **Whisper mode is not lipreading.** It needs at least whispered speech — some
-  audible airflow through real words. Mouthing in complete silence gives the
-  model nothing to work with. The lips only gate when it listens.
-- **Whisper mode inherits Whisper's habits.** Very faint whispers, unusual
+- **Silent coverage is the library.** In silence, Sotto recognizes the phrases
+  it has been taught or has learned from your speech — up to 60 phrases (at
+  most 40 of them learned) with up to 8 takes each. It cannot read arbitrary
+  silent speech; nothing can, yet.
+- **Dictation needs sound.** The voiced path needs at least whispered speech —
+  some audible airflow through real words. Mouthing in complete silence gives
+  the speech model nothing to work with; the lips only gate when it listens.
+- **The voiced path inherits Whisper's habits.** Very faint whispers, unusual
   vocabulary, and noisy rooms degrade transcription, and the model can
   hallucinate on near-silence (Sotto filters the classic cases, but not all of
   them).
+- **A learned phrase starts from one voiced take.** Saying a phrase aloud and
+  mouthing it silently are not identical motions, so a freshly learned phrase
+  may need to be heard once or twice more before silent matching lands
+  reliably. Extra takes accumulate automatically as you keep talking.
 - **Visually similar phrases collide.** Many sounds are indistinguishable on the
   lips ("pat" and "bat" are the same movie). Phrases that look alike when mouthed
   will confuse the matcher; pick phrases that move your mouth differently.

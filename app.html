@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>sotto. — the pad</title>
-  <meta name="description" content="Sotto research preview. Two on-device input modes: calibrated silent phrases (camera only) and Whisper dictation, where lip movement decides when the microphone is heard. Nothing uploaded.">
+  <meta name="description" content="Sotto research preview. One on-device flow: mouth a taught phrase in silence or whisper anything — lip movement decides when the microphone is heard, and Sotto learns your lips as you speak. Nothing uploaded.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#FAF7F2" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#131110" media="(prefers-color-scheme: dark)">
@@ -31,21 +31,19 @@
   </header>
 
   <main class="wrap app-main" id="main">
-    <h1 class="visually-hidden">Sotto — silent phrase input and whisper dictation</h1>
+    <h1 class="visually-hidden">Sotto — silent phrases with voice assist</h1>
 
     <!-- ============ camera column (5/12) ============ -->
     <section class="col-cam" aria-labelledby="cam-h">
       <h2 class="visually-hidden" id="cam-h">Camera</h2>
 
-      <div class="mode-switch" id="mode-switch" role="radiogroup" aria-label="Input mode">
-        <label class="mode-opt">
-          <input type="radio" name="input-mode" value="phrases" id="mode-phrases" checked>
-          <span>Phrases</span>
-        </label>
-        <label class="mode-opt">
-          <input type="radio" name="input-mode" value="whisper" id="mode-whisper">
-          <span>Whisper</span>
-        </label>
+      <div class="status-strip" id="status-strip">
+        <span class="status-strip-text">Silent phrases + voice assist</span>
+        <button class="pill mic-chip" id="mic-chip" type="button" aria-controls="settings-drawer"
+                aria-label="Microphone off — voice assist settings">
+          <span class="dot-ind"></span>
+          <span id="mic-chip-text">mic off</span>
+        </button>
       </div>
 
       <div class="card cam-card">
@@ -76,8 +74,8 @@
             <h3 id="mic-empty-title">Microphone blocked</h3>
             <p class="soft" id="mic-empty-body"></p>
             <div class="mic-empty-actions">
-              <button class="btn" id="mic-empty-retry">Try Whisper again</button>
-              <button class="btn-ghost" id="mic-empty-dismiss">Stay in Phrases</button>
+              <button class="btn" id="mic-empty-retry">Try voice assist again</button>
+              <button class="btn-ghost" id="mic-empty-dismiss">Stay silent-only</button>
             </div>
           </div>
 
@@ -94,7 +92,7 @@
 
           <div class="toast-region" id="toast-region" aria-live="polite"></div>
         </div>
-        <p class="cam-privacy" id="cam-privacy">Phrase mode: camera only. No audio is captured; frames are processed on this device and discarded.</p>
+        <p class="cam-privacy" id="cam-privacy">Camera only. The microphone is off; silent phrases still work.</p>
       </div>
 
       <div class="cam-controls">
@@ -109,7 +107,7 @@
         <label class="switch">
           <input type="checkbox" id="pause-toggle">
           <span class="track" aria-hidden="true"></span>
-          <span class="switch-label" id="pause-label">Pause matching</span>
+          <span class="switch-label">Pause input</span>
         </label>
       </div>
 
@@ -142,15 +140,15 @@
             <label class="switch">
               <input type="checkbox" id="autocopy-toggle">
               <span class="track" aria-hidden="true"></span>
-              <span class="switch-label" id="autocopy-label">Auto-copy each match</span>
+              <span class="switch-label">Auto-copy the pad</span>
             </label>
             <button class="btn-ghost btn-sm" id="copy-btn">Copy all</button>
             <button class="btn-ghost btn-sm" id="clear-btn">Clear</button>
           </div>
         </div>
         <textarea id="pad" class="pad" rows="4" spellcheck="false"
-                  placeholder="Matched phrases land here."
-                  aria-label="The pad. Matched phrases are appended here."></textarea>
+                  placeholder="Phrases and speech land here."
+                  aria-label="The pad. Recognized phrases and transcribed speech are appended here."></textarea>
       </div>
 
       <div class="card book-card">
@@ -164,15 +162,15 @@
                    aria-label="Import a phrasebook JSON file">
           </div>
         </div>
-        <p class="soft book-note">Sotto only knows the phrases you teach it. Three silent takes each.</p>
+        <p class="soft book-note">Sotto reads silently only what is in this book — phrases you teach it, plus ones it learns when you speak.</p>
         <ul class="phrase-list" id="phrase-list" aria-labelledby="book-h"></ul>
-        <p class="soft" id="book-empty">Nothing here yet. Add a phrase, or start the camera and take the starter pack.</p>
+        <p class="soft" id="book-empty">Nothing here yet. Silence works for phrases Sotto has learned — whisper things once and they show up here, or teach phrases manually. <button type="button" class="link-btn" id="book-empty-starter">Teach the starter six</button></p>
       </div>
 
     </section>
   </main>
 
-  <p class="wrap app-foot soft" id="app-foot">No audio is captured. The camera feed, the model, and your phrasebook stay on this device.</p>
+  <p class="wrap app-foot soft" id="app-foot">Everything runs on this device. Camera frames, any audio while voice assist is on, and your phrasebook stay here — nothing is uploaded.</p>
 
   <!-- ============ settings drawer ============ -->
   <aside class="card drawer" id="settings-drawer" aria-labelledby="settings-h" hidden>
@@ -180,6 +178,18 @@
       <h3 id="settings-h">Settings</h3>
       <button class="btn-ghost btn-sm" id="settings-close">Close</button>
     </div>
+
+    <div class="drawer-block">
+      <h4>Voice assist</h4>
+      <p class="soft">While the camera runs, the microphone listens and on-device speech recognition types what you say — and Sotto learns your lips as you speak, growing the silent phrasebook. Turning this off releases the microphone immediately; silent phrases keep working.</p>
+      <label class="switch">
+        <input type="checkbox" id="voice-toggle" checked>
+        <span class="track" aria-hidden="true"></span>
+        <span class="switch-label">Voice assist</span>
+      </label>
+    </div>
+
+    <hr class="rule">
 
     <div class="drawer-block">
       <h4>Pipeline self-test</h4>
@@ -195,14 +205,14 @@
 
     <div class="drawer-block">
       <h4>Starter pack</h4>
-      <p class="soft">Six everyday phrases, guided calibration, about two minutes. Offered automatically when the book is empty; run it again any time.</p>
-      <button class="btn-ghost" id="starter-btn">Run starter calibration</button>
+      <p class="soft">Six everyday phrases, guided calibration, about two minutes. Run it any time.</p>
+      <button class="btn-ghost" id="starter-btn">Teach the starter six</button>
     </div>
 
     <hr class="rule">
 
     <div class="drawer-block" id="asr-block" hidden>
-      <h4>Whisper mode</h4>
+      <h4>Speech model</h4>
       <p class="soft" id="asr-info"></p>
     </div>
 
@@ -211,16 +221,6 @@
 
   <!-- ============ calibration dialog ============ -->
   <dialog class="card cal-dialog" id="cal-dialog" aria-label="Calibration">
-
-    <section class="cal-step" id="cal-step-offer" hidden>
-      <h3>Teach it six phrases</h3>
-      <p>The book is empty. Sotto matches only what it has seen you mouth, so the demo starts with a short calibration: six everyday phrases, three silent takes each. About two minutes.</p>
-      <p class="soft cal-list">hello &middot; yes &middot; no &middot; thank you &middot; on my way &middot; send it</p>
-      <div class="cal-actions">
-        <button class="btn-accent" id="cal-offer-start">Start the six</button>
-        <button class="btn-ghost" id="cal-offer-later">I'll add my own</button>
-      </div>
-    </section>
 
     <section class="cal-step" id="cal-step-camera" hidden>
       <h3>Camera first</h3>

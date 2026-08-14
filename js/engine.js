@@ -85,6 +85,9 @@ const MAX_TAKES = 8;
 const MAX_LABEL_LEN = 64;
 const STORAGE_KEY = 'sotto.library.v1';
 
+/** touchPhrase() persistence throttle: at most one touch-driven write per. */
+const TOUCH_PERSIST_MS = 5000;
+
 /** Face-loss grace period before reporting 'no-face' from idle. */
 const FACE_LOST_MS = 1000;
 
@@ -319,6 +322,15 @@ function nowMs() {
     ? performance.now() : Date.now();
 }
 
+/** Mean of a numeric array; 0 for an empty one (segment audio level). */
+function meanLevel(levels) {
+  const n = levels.length;
+  if (n === 0) return 0;
+  let s = 0;
+  for (let i = 0; i < n; i++) s += levels[i];
+  return s / n;
+}
+
 /** 2D landmark distance with x corrected by frame aspect ratio (landmarks
  *  are normalized to the frame, so ratios need isotropic units). */
 function landmarkDist(a, b, aspect) {
@@ -384,6 +396,15 @@ function validateLibraryShape(obj) {
     if (typeof p.createdAt !== 'number' || !Number.isFinite(p.createdAt)) {
       throw bad(`phrase "${p.label}" is missing a numeric createdAt`);
     }
+    // Optional v0.4 fields: tolerated when absent (absent = not learned),
+    // type-checked when present, and preserved as-is through load/import.
+    if ('learned' in p && typeof p.learned !== 'boolean') {
+      throw bad(`phrase "${p.label}" has a non-boolean learned flag`);
+    }
+    if ('lastUsedAt' in p && p.lastUsedAt !== null
+        && (typeof p.lastUsedAt !== 'number' || !Number.isFinite(p.lastUsedAt))) {
+      throw bad(`phrase "${p.label}" has an invalid lastUsedAt`);
+    }
     if (!Array.isArray(p.templates) || p.templates.length === 0 || p.templates.length > MAX_TAKES) {
       throw bad(`phrase "${p.label}" must have 1-${MAX_TAKES} templates`);
     }
@@ -436,6 +457,9 @@ function hashString(s) {
  * @property {number} t0 ms timestamp of the first frame
  * @property {number} t1 ms timestamp of the last frame
  * @property {number} durationMs t1 - t0
+ * @property {number} audioLevel mean polled audio-provider level (mic RMS
+ *           0..1) across this segment's frames; 0 when no provider is set.
+ *           Split pieces average only their own span.
  * @property {string} [recordingLabel] set when this segment was captured as a
  *           calibration template
  * @property {string} [recordingError] set if storing the template failed
@@ -455,6 +479,10 @@ function hashString(s) {
  * @property {string} label
  * @property {number} templates number of stored takes
  * @property {number} createdAt ms epoch
+ * @property {boolean} learned true when the phrase was auto-learned from
+ *           speech (enrollSegment) rather than calibrated
+ * @property {number|null} lastUsedAt ms epoch of the last touchPhrase(), or
+ *           null if never touched
  */
 
 // ---------------------------------------------------------------------------
@@ -514,6 +542,7 @@ export class SottoEngine {
     this._ring = [];
     for (let i = 0; i < RING_SIZE; i++) this._ring.push(new Float32Array(F_DIM));
     this._ringTs = new Float64Array(RING_SIZE);
+    this._ringLevels = new Float64Array(RING_SIZE); // polled audio level per slot
     this._ringHead = 0;
     this._ringCount = 0;
 
@@ -524,6 +553,7 @@ export class SottoEngine {
     this._speaking = false;
     this._segFrames = null;
     this._segTs = null;
+    this._segLevels = null; // per-frame polled audio levels, parallel to _segTs
     this._refractory = false; // after an over-long discard: wait for stillness
     // Segment options + audio fusion (defaults preserve v0.1 behavior).
     this._maxSegMs = MAX_SEG_MS;
@@ -554,6 +584,10 @@ export class SottoEngine {
     this._library = this._loadLibrary();
     this._cache = []; // [{label, takes: Float32Array(L*F)[]}]
     this._rebuildCache();
+
+    // touchPhrase() persistence throttle (leading write + one trailing write).
+    this._lastTouchPersistT = -Infinity;
+    this._touchPersistTimer = 0;
 
     this._boundVfc = this._vfcStep.bind(this);
     this._boundRaf = this._rafStep.bind(this);
@@ -775,6 +809,8 @@ export class SottoEngine {
       label: p.label,
       templates: p.templates.length,
       createdAt: p.createdAt,
+      learned: p.learned === true,
+      lastUsedAt: typeof p.lastUsedAt === 'number' ? p.lastUsedAt : null,
     }));
   }
 
@@ -840,6 +876,80 @@ export class SottoEngine {
   }
 
   /**
+   * Enroll a segment's frames as a template for a phrase, outside the
+   * calibration flow (v0.4 auto-learning). Caps match the recording path
+   * with one difference: when the phrase already exists and is at the
+   * 8-take cap, take 0 (the oldest) is evicted silently and the new take
+   * added — no throw. Creating a new phrase stores learned and
+   * lastUsedAt: null; adding a take to an existing phrase changes neither
+   * field. Persists immediately (not throttled).
+   * @param {string} label phrase label (trimmed, 1-64 chars)
+   * @param {number[][]} frames feature rows, each exactly 22 finite numbers
+   *        (>= 2 rows; e.g. a Segment's frames)
+   * @param {Object} [opts]
+   * @param {boolean} [opts.learned=false] mark a newly created phrase as
+   *        auto-learned (ignored when the phrase already exists)
+   * @returns {{label: string, templates: number}} the label and its take
+   *          count after enrollment
+   * @throws {SottoEngineError} 'bad-label' | 'invalid-frames' |
+   *         'library-full' (creating beyond 60 phrases)
+   */
+  enrollSegment(label, frames, { learned = false } = {}) {
+    const lab = normalizeLabel(label);
+    validateFrames(frames, 'enrolled frames');
+    let phrase = this._findPhrase(lab);
+    if (!phrase) {
+      if (this._library.phrases.length >= MAX_PHRASES) {
+        throw new SottoEngineError('library-full', `library is capped at ${MAX_PHRASES} phrases`);
+      }
+      phrase = {
+        label: lab,
+        createdAt: Date.now(),
+        templates: [],
+        learned: !!learned,
+        lastUsedAt: null,
+      };
+      this._library.phrases.push(phrase);
+    } else {
+      while (phrase.templates.length >= MAX_TAKES) phrase.templates.shift();
+    }
+    phrase.templates.push(frames.map((row) => Array.from(row, Number)));
+    this._persist();
+    this._rebuildCache();
+    return { label: lab, templates: phrase.templates.length };
+  }
+
+  /**
+   * Mark a phrase as just used: sets lastUsedAt to now, in memory
+   * immediately, with touch-driven persistence throttled to at most one
+   * localStorage write per 5 s (leading write, then one trailing write at
+   * the window's end so the last touch is never lost). Any full persist
+   * from another mutation cancels a pending trailing write — the data is
+   * already on disk.
+   * @param {string} label phrase label
+   * @returns {void}
+   * @throws {SottoEngineError} 'bad-label' | 'not-found'
+   */
+  touchPhrase(label) {
+    const lab = normalizeLabel(label);
+    const phrase = this._findPhrase(lab);
+    if (!phrase) throw new SottoEngineError('not-found', `no phrase "${lab}"`);
+    phrase.lastUsedAt = Date.now();
+    const now = nowMs();
+    const since = now - this._lastTouchPersistT;
+    if (since >= TOUCH_PERSIST_MS) {
+      this._lastTouchPersistT = now;
+      this._persist();
+    } else if (!this._touchPersistTimer) {
+      this._touchPersistTimer = setTimeout(() => {
+        this._touchPersistTimer = 0;
+        this._lastTouchPersistT = nowMs();
+        this._persist();
+      }, TOUCH_PERSIST_MS - since);
+    }
+  }
+
+  /**
    * Export the full library as a JSON string (the storage shape, version 1).
    * @returns {string}
    */
@@ -864,9 +974,19 @@ export class SottoEngine {
       throw new SottoEngineError('invalid-library', 'import is not valid JSON');
     }
     validateLibraryShape(obj);
-    const merged = this._library.phrases.map((p) => ({
+    // The optional learned/lastUsedAt fields are copied only when present
+    // (absent = not learned, and absence itself is preserved). On a
+    // same-label merge the local phrase's fields win: takes are added, but
+    // a calibrated phrase never becomes learned (learned entries are
+    // evictable; calibrated ones must not be).
+    const copyMeta = (dst, src) => {
+      if ('learned' in src) dst.learned = src.learned;
+      if ('lastUsedAt' in src) dst.lastUsedAt = src.lastUsedAt;
+      return dst;
+    };
+    const merged = this._library.phrases.map((p) => copyMeta({
       label: p.label, createdAt: p.createdAt, templates: p.templates.slice(),
-    }));
+    }, p));
     for (const inc of obj.phrases) {
       const existing = merged.find((p) => p.label === inc.label);
       if (existing) {
@@ -881,11 +1001,11 @@ export class SottoEngine {
           throw new SottoEngineError('library-full',
             `merging would exceed ${MAX_PHRASES} phrases`);
         }
-        merged.push({
+        merged.push(copyMeta({
           label: inc.label,
           createdAt: inc.createdAt,
           templates: deepCopyTemplates(inc.templates),
-        });
+        }, inc));
       }
     }
     this._library = { version: 1, phrases: merged };
@@ -925,6 +1045,8 @@ export class SottoEngine {
    * Run a frames array through the full segment pipeline exactly as a live
    * utterance would be: recording-if-armed, then onSegment, then matching and
    * onMatch. Works with the camera stopped. UI must label results simulated.
+   * audioLevel is one provider poll at injection time (0 with no provider),
+   * so tests can stub a voiced segment by installing a constant provider.
    * @param {number[][]} frames rows of 22 finite numbers (>= 2 rows)
    * @returns {Segment} the synthesized segment (timestamps assume ~30 fps)
    * @throws {SottoEngineError} 'invalid-frames'
@@ -934,7 +1056,10 @@ export class SottoEngine {
     const copy = frames.map((row) => Array.from(row, Number));
     const t1 = nowMs();
     const durationMs = ((copy.length - 1) / 30) * 1000;
-    const seg = { frames: copy, t0: t1 - durationMs, t1, durationMs };
+    const seg = {
+      frames: copy, t0: t1 - durationMs, t1, durationMs,
+      audioLevel: this._pollAudioLevel(),
+    };
     this._finishSegment(seg);
     return seg;
   }
@@ -1139,10 +1264,14 @@ export class SottoEngine {
       this._haveFeatures = true;
       this._energy += EMA_ALPHA * (raw - this._energy);
 
-      // Pre-roll ring push (copies into preallocated slots).
+      // Pre-roll ring push (copies into preallocated slots). The level slot
+      // is zeroed here and overwritten with the polled audio level inside
+      // _segmentStep, so frames pushed while paused never carry a stale
+      // level from an earlier ring lap.
       const slot = this._ring[this._ringHead];
       slot.set(this._features);
       this._ringTs[this._ringHead] = t;
+      this._ringLevels[this._ringHead] = 0;
       this._ringHead = (this._ringHead + 1) % RING_SIZE;
       if (this._ringCount < RING_SIZE) this._ringCount++;
 
@@ -1211,6 +1340,13 @@ export class SottoEngine {
   // -- internals: segmentation ----------------------------------------------
 
   _segmentStep(t) {
+    // Audio+lip fusion: poll the provider at most once per frame (0 with no
+    // provider) and record the level against the ring slot pushed for this
+    // frame, so seeded pre-roll frames carry their true levels into
+    // Segment.audioLevel. Energy is lips-only, so audio can only soften the
+    // thresholds below — it can never start a segment by itself.
+    const level = this._pollAudioLevel();
+    this._ringLevels[(this._ringHead - 1 + RING_SIZE) % RING_SIZE] = level;
     const e = this._energy;
     if (this._refractory) {
       // After discarding an over-long utterance: require stillness before
@@ -1218,11 +1354,7 @@ export class SottoEngine {
       if (e < TAU_OFF) this._refractory = false;
       return;
     }
-    // Audio+lip fusion: poll the provider at most once per frame. Energy is
-    // lips-only, so audio can only soften the thresholds below — it can
-    // never start a segment by itself.
-    const audioActive = this._audioLevelProvider !== null
-      && this._pollAudioLevel() > AUDIO_ACTIVE_RMS;
+    const audioActive = level > AUDIO_ACTIVE_RMS;
     if (!this._speaking) {
       const tauOn = audioActive ? TAU_ON * AUDIO_TAU_ON_FACTOR : TAU_ON;
       if (e > tauOn) {
@@ -1236,6 +1368,7 @@ export class SottoEngine {
     // Active utterance: append the current frame (bounded copy — allowed).
     this._segFrames.push(Array.from(this._features));
     this._segTs.push(t);
+    this._segLevels.push(level);
     if (t - this._segTs[0] > this._maxSegMs) {
       if (this._splitOnMax && !this._pendingRecording) {
         this._splitSegment();
@@ -1302,15 +1435,20 @@ export class SottoEngine {
       t0: ts[0],
       t1: ts[ts.length - 1],
       durationMs: ts[ts.length - 1] - ts[0],
+      audioLevel: meanLevel(this._segLevels),
     };
-    // Reseed before emitting so callbacks observe a consistent engine.
+    // Reseed before emitting so callbacks observe a consistent engine. The
+    // fresh level array starts from the reseeded ring frames only, so each
+    // split piece averages exactly its own span.
     const take = Math.min(this._ringCount, PRE_ROLL);
     this._segFrames = [];
     this._segTs = [];
+    this._segLevels = [];
     for (let k = take; k >= 1; k--) {
       const idx = (this._ringHead - k + RING_SIZE * 2) % RING_SIZE;
       this._segFrames.push(Array.from(this._ring[idx]));
       this._segTs.push(this._ringTs[idx]);
+      this._segLevels.push(this._ringLevels[idx]);
     }
     this._finishSegment(seg);
   }
@@ -1321,10 +1459,12 @@ export class SottoEngine {
     const take = Math.min(this._ringCount, ON_FRAMES + PRE_ROLL);
     this._segFrames = [];
     this._segTs = [];
+    this._segLevels = [];
     for (let k = take; k >= 1; k--) {
       const idx = (this._ringHead - k + RING_SIZE * 2) % RING_SIZE;
       this._segFrames.push(Array.from(this._ring[idx]));
       this._segTs.push(this._ringTs[idx]);
+      this._segLevels.push(this._ringLevels[idx]);
     }
     this._speaking = true;
     this._onCount = 0;
@@ -1336,6 +1476,7 @@ export class SottoEngine {
     this._speaking = false;
     this._segFrames = null;
     this._segTs = null;
+    this._segLevels = null;
     this._onCount = 0;
     this._offCount = 0;
     if (this._state === 'speaking') this._setState('idle');
@@ -1344,6 +1485,7 @@ export class SottoEngine {
   _endSegment() {
     const frames = this._segFrames;
     const ts = this._segTs;
+    const levels = this._segLevels;
     // The trailing still run is exactly _offCount consecutive sub-threshold
     // frames (OFF_FRAMES in lips-only mode; up to double under audio
     // fusion); keep a few as closing context and drop the rest so segments
@@ -1352,6 +1494,7 @@ export class SottoEngine {
     this._speaking = false;
     this._segFrames = null;
     this._segTs = null;
+    this._segLevels = null;
     this._onCount = 0;
     this._offCount = 0;
     this._setState('idle');
@@ -1359,11 +1502,13 @@ export class SottoEngine {
     if (keep < MIN_SEG_FRAMES) return; // too short — discard silently
     frames.length = keep;
     ts.length = keep;
+    levels.length = keep; // audioLevel averages only the emitted frames
     const seg = {
       frames,
       t0: ts[0],
       t1: ts[keep - 1],
       durationMs: ts[keep - 1] - ts[0],
+      audioLevel: meanLevel(levels),
     };
     this._finishSegment(seg);
   }
@@ -1486,6 +1631,11 @@ export class SottoEngine {
   }
 
   _persist() {
+    // A full write covers any pending throttled touchPhrase() write.
+    if (this._touchPersistTimer) {
+      clearTimeout(this._touchPersistTimer);
+      this._touchPersistTimer = 0;
+    }
     if (!this._storage) return;
     try {
       this._storage.setItem(STORAGE_KEY, JSON.stringify(this._library));
@@ -1503,6 +1653,7 @@ export class SottoEngine {
     this._speaking = false;
     this._segFrames = null;
     this._segTs = null;
+    this._segLevels = null;
     this._refractory = false;
     this._haveFeatures = false;
     this._faceOk = false;
