@@ -193,6 +193,17 @@
   border-radius: 999px; background: var(--accent);
 }
 
+/* Live transcription ticker (Whisper mode): the currently-decoding job's
+   accumulated partial text, streamed word by word. Empty and hidden when no
+   job is decoding; final text still lands in the pad. */
+.ticker {
+  margin: 0; padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--accent);
+  font-size: 0.9375rem; color: var(--ink-soft);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
+}
+
 /* ---------- toast chips ---------- */
 
 .toast-region {

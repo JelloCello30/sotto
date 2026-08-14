@@ -65,20 +65,29 @@ captured through an AudioWorklet into a rolling 30-second ring buffer at 16kHz
 (raw PCM, in memory, never persisted). When the v0.1 engine's segmentation sees
 *your* mouth start and stop moving, that utterance's time window — padded a
 quarter second on each side — is clipped from the buffer and handed to the
-model. Speech that happens while your mouth is still is never transcribed. The
-lips decide *when*; the audio decides *what*. It is sensor fusion, not
-lipreading.
+model. Long utterances are not cut off: past about six seconds the segment is
+split, the finished piece goes off to decode, and the next begins without
+dropping a frame, so a long thought arrives in pieces instead of not at all.
+(Phrase-mode calibration takes stay bounded — a take that runs past the limit
+is still discarded, on purpose.) Speech that happens while your mouth is still
+is never transcribed. The lips decide *when*; the audio decides *what*. It is
+sensor fusion, not lipreading.
 
 **Cost.** The speech model (Whisper base.en, 8-bit ONNX) is a one-time download
 of roughly 75MB, precached by the service worker like everything else. Measured
-on an M-series MacBook on the single-threaded WASM path: about 2.5 seconds to
-transcribe a 3-second utterance once warm, roughly double on the first
-utterance. WebGPU is attempted first and is faster where it works; a built-in
-canary transcription (a public-domain 1961 JFK inaugural excerpt) checks the
-GPU build actually decodes speech and quietly falls back to WASM when it
-doesn't — some GPU stacks produce garbage without ever throwing an error.
-Inference runs in a module worker, so the interface stays responsive while you
-wait.
+on an M-series MacBook: about a second per utterance once warm, on
+single-threaded WASM — threads were benchmarked and do not help this workload;
+the decoder is sequential. The first utterance after a load takes a few
+seconds. While the model decodes, partial text streams into the app live, so
+you read words as they are recognized instead of watching a status light.
+Startup depends on history. WebGPU is attempted first and used where it works;
+a built-in canary transcription (a public-domain 1961 JFK inaugural excerpt)
+checks the GPU build actually decodes speech, because some GPU stacks produce
+garbage without ever throwing an error. On a machine whose GPU fails that
+check, the very first visit can take about 20 seconds before the fallback
+settles; Sotto remembers the verdict, so repeat visits skip the detour and the
+model is ready in about 4 to 6 seconds. Inference runs in a module worker, so
+the interface stays responsive throughout.
 
 **Switching.** The mode control lives in the app's camera column, and the
 choice persists. Leaving Whisper mode releases the microphone immediately — the
@@ -141,7 +150,8 @@ sotto/
 ├── serve.py                 static dev server, port 4173
 ├── DESIGN.md                design system and voice
 ├── SPEC.md                  v0.1 engine specification
-└── SPEC-V2.md               v0.2 Whisper mode specification
+├── SPEC-V2.md               v0.2 Whisper mode specification
+└── SPEC-V3.md               v0.3 fast-feel specification
 ```
 
 ## Privacy
@@ -204,6 +214,12 @@ Directions under exploration — not promises:
 - Per-phrase threshold adaptation from practice-mode statistics.
 - A proper study of vocabulary size vs. accuracy, published with the numbers,
   whatever they turn out to be.
+
+## Author
+
+Sotto is built by Nolan Woo ([@JelloCello30](https://github.com/JelloCello30)),
+a cellist. It started with wanting to answer messages mid-practice; the cello
+takes both hands and does not negotiate.
 
 ## License
 

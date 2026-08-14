@@ -20,9 +20,15 @@
  *                    { id, type: 'transcribe',
  *                      payload: { buffer, byteOffset, length } }   [buffer transferred]
  *                    { id, type: 'dispose' }
- *   worker -> main : { id, type: 'result', payload: { text?, device } }
+ *   worker -> main : { id, type: 'result', payload: { text?, device, model? } }
+ *                      [load results carry model: MODEL_ID]
+ *                    { id, type: 'partial', payload: { text } }
+ *                      [ACCUMULATED partial transcription for the in-flight
+ *                       transcribe job, at most one message per 120 ms, no
+ *                       trailing flush — the final result supersedes; never
+ *                       emitted for the canary or warm-up runs]
  *                    { id, type: 'error',  payload: { message } }
- *                    {     type: 'status', payload: { status, progress?, device?, message? } }
+ *                    {     type: 'status', payload: { status, model, progress?, device?, message? } }
  *                      status: 'loading-model' | 'warming' | 'ready' | 'error'
  */
 
@@ -38,6 +44,14 @@ export const MODEL_ID = 'base';
 
 /** Warm-up input: 0.5 s of silence at 16 kHz, so the first real job is fast. */
 const WARMUP_SAMPLES = 8000;
+
+/**
+ * Minimum gap between partial-transcription messages for one job. The
+ * decoder emits tokens far faster than anyone reads; one update per 120 ms
+ * looks live on screen without flooding the main thread. No trailing flush
+ * — the final result message supersedes whatever partial rendered last.
+ */
+const PARTIAL_MIN_INTERVAL_MS = 120;
 
 /** Inputs quieter than this RMS are treated as silence for hallucination suppression. */
 const SILENCE_RMS = 0.004;
@@ -104,6 +118,12 @@ let pipe = null;          // the transformers.js ASR pipeline, once built
 let device = null;        // 'webgpu' | 'wasm'
 let loaded = false;       // true once load + warm-up completed
 
+// Streamer classes captured from the vendored bundle when the pipeline is
+// built. Either may be missing from a future bundle; partials then degrade
+// (Whisper -> plain -> none) without touching transcription itself.
+let WhisperTextStreamerClass = null;
+let TextStreamerClass = null;
+
 // Model files load in parallel; aggregate their progress into one percentage.
 const fileProgress = new Map();
 let lastPct = -1;
@@ -117,7 +137,9 @@ let chain = Promise.resolve();
 // ---------------------------------------------------------------------------
 
 function postStatus(status, detail = {}) {
-  self.postMessage({ type: 'status', payload: { status, ...detail } });
+  // model rides on every status so the main thread always knows which
+  // checkpoint this worker runs (SottoASR persists device verdicts per model).
+  self.postMessage({ type: 'status', payload: { status, model: MODEL_ID, ...detail } });
 }
 
 function postResult(id, payload) {
@@ -155,9 +177,12 @@ function onProgress(p) {
  * relative so vendor/ resolves under both / and /sotto/ deploys.
  */
 async function buildPipeline(dev) {
-  const { pipeline, env } = await import(
+  const mod = await import(
     new URL('../vendor/transformers/transformers.min.js', import.meta.url).href
   );
+  const { pipeline, env } = mod;
+  WhisperTextStreamerClass = mod.WhisperTextStreamer || null;
+  TextStreamerClass = mod.TextStreamer || null;
   env.allowRemoteModels = false;
   env.allowLocalModels = true;
   env.localModelPath = new URL('../vendor/whisper/', import.meta.url).href;
@@ -384,17 +409,55 @@ function decodeBudget(audio) {
   return Math.max(MIN_NEW_TOKENS_CAP, Math.ceil(seconds * TOKENS_PER_SECOND_CAP));
 }
 
-async function doTranscribe(audio) {
+/**
+ * Build a streamer that posts {id, type: 'partial'} messages carrying the
+ * ACCUMULATED decoder text, at most one message per PARTIAL_MIN_INTERVAL_MS
+ * (accumulation continues between posts; nothing is lost to the throttle).
+ * Prefers WhisperTextStreamer, whose put() consumes Whisper's timestamp
+ * tokens so they never leak into the text; falls back to a plain
+ * TextStreamer. Returns null when neither class is available or
+ * construction throws — partials are an enhancement, never a dependency,
+ * and the job then runs exactly as it did before v0.3. Only real
+ * transcribe jobs get one: the canary and warm-up runs never stream.
+ * @param {number} id job id stamped on each partial message
+ * @returns {object|null} a streamer for the pipeline call, or null
+ */
+function makePartialStreamer(id) {
+  let text = '';
+  let lastSentAt = 0;
+  const callback_function = (delta) => {
+    if (typeof delta !== 'string' || delta === '') return;
+    text += delta;
+    const now = Date.now();
+    if (now - lastSentAt < PARTIAL_MIN_INTERVAL_MS) return;
+    lastSentAt = now;
+    self.postMessage({ id, type: 'partial', payload: { text } });
+  };
+  try {
+    if (WhisperTextStreamerClass) {
+      return new WhisperTextStreamerClass(pipe.tokenizer, { callback_function });
+    }
+    if (TextStreamerClass) {
+      return new TextStreamerClass(pipe.tokenizer, { skip_prompt: true, callback_function });
+    }
+  } catch { /* construction failed: run without partials */ }
+  return null;
+}
+
+async function doTranscribe(audio, id) {
   if (!loaded || !pipe) throw new Error('model not loaded');
   if (audio.length === 0) return '';
 
   const rms = rmsOf(audio);
   const opts = { max_new_tokens: decodeBudget(audio) };
+  // Partials stream while the decoder runs; the loop guard and silence
+  // suppression below judge ONLY the final text.
+  const streamer = makePartialStreamer(id);
 
   let text;
   let gpuFailedLate = false;
   try {
-    ({ text } = await pipe(audio, opts));
+    ({ text } = await pipe(audio, streamer ? { ...opts, streamer } : opts));
     // Some GPUs fail silently: no exception, but broken q8 kernels make the
     // decoder loop garbage. Only judge real speech — silence legitimately
     // produces repetitive hallucinations on healthy hardware.
@@ -409,9 +472,12 @@ async function doTranscribe(audio) {
 
   if (gpuFailedLate) {
     // A GPU that survived warm-up can still fail on a real buffer (thrown
-    // error or silent garbage). Rebuild on wasm and retry exactly once.
+    // error or silent garbage). Rebuild on wasm and retry exactly once,
+    // with a FRESH streamer: the new pipeline has a new tokenizer, and the
+    // failed attempt's garbage must not prefix the retry's partials.
     await rebuildOnWasm();
-    ({ text } = await pipe(audio, opts));
+    const retryStreamer = makePartialStreamer(id);
+    ({ text } = await pipe(audio, retryStreamer ? { ...opts, streamer: retryStreamer } : opts));
     postStatus('ready', { device });
   }
 
@@ -431,10 +497,10 @@ async function handle(msg) {
   try {
     if (type === 'load') {
       await doLoad(payload && payload.device === 'wasm' ? 'wasm' : 'auto');
-      postResult(id, { device });
+      postResult(id, { device, model: MODEL_ID });
     } else if (type === 'transcribe') {
       const audio = new Float32Array(payload.buffer, payload.byteOffset, payload.length);
-      const text = await doTranscribe(audio);
+      const text = await doTranscribe(audio, id);
       postResult(id, { text, device });
     } else if (type === 'dispose') {
       if (pipe) {

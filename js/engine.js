@@ -2,7 +2,10 @@
  * Sotto — recognition engine (js/engine.js)
  *
  * Silent-speech phrase recognition over MediaPipe face blendshapes.
- * Fully on-device: vendored model, no network, no audio — ever.
+ * Fully on-device: vendored model, no network. The engine captures no
+ * audio; at most it reads a mic RMS number from an app-supplied provider
+ * (whisper mode, setAudioLevelProvider), and lip motion still gates every
+ * segment.
  *
  * Exports:
  *   SottoEngine (default + named)  — the engine class per SPEC.md
@@ -40,8 +43,28 @@ const OFF_FRAMES = 12;    // ~400 ms of stillness at 30 fps ends the utterance
 const PRE_ROLL = 4;       // frames kept from before the trigger frame
 const MIN_SEG_FRAMES = 10;
 const MAX_SEG_MS = 6000;
-/** Of the OFF_FRAMES still tail, keep this many frames as closing context. */
+/** Of the trailing still frames, keep this many as closing context. */
 const TAIL_KEEP = 3;
+
+/** setSegmentOptions clamp range for maxSegMs (the mic ring holds 30 s). */
+const MAX_SEG_MS_MIN = 2000;
+const MAX_SEG_MS_MAX = 30000;
+
+/**
+ * Audio+lip fusion (whisper mode; active only while an audio-level provider
+ * is set). AUDIO_ACTIVE_RMS is whisper-level speech with AGC on. While the
+ * mic RMS is above it, the segment-start threshold drops to
+ * TAU_ON * AUDIO_TAU_ON_FACTOR (quiet-lipped speech triggers; silent lip
+ * motion — chewing, smiling — still needs the full threshold) and the
+ * still frames required to end a segment double (talking through a
+ * lip-still moment does not truncate the utterance; bounded by maxSegMs).
+ * Energy itself is lips-only, so audio can never start a segment alone.
+ */
+const AUDIO_ACTIVE_RMS = 0.012;
+const AUDIO_TAU_ON_FACTOR = 0.55;
+const AUDIO_OFF_FRAMES_FACTOR = 2;
+/** Consecutive provider exceptions before the provider is auto-cleared. */
+const AUDIO_PROVIDER_MAX_THROWS = 3;
 
 /**
  * Accept threshold for the path-normalized squared-euclidean DTW distance.
@@ -112,7 +135,8 @@ export const CONSTANTS = Object.freeze({
   F_DIM, L_RESAMPLE, DTW_BAND, EMA_ALPHA, TAU_ON, TAU_OFF, ON_FRAMES,
   OFF_FRAMES, PRE_ROLL, MIN_SEG_FRAMES, MAX_SEG_MS, TAU_ACCEPT_BASE,
   TAU_ACCEPT_SPAN, MARGIN_RATIO, REJECT_FACTOR, MAX_PHRASES, MAX_TAKES,
-  FACE_LOST_MS, STORAGE_KEY,
+  FACE_LOST_MS, STORAGE_KEY, MAX_SEG_MS_MIN, MAX_SEG_MS_MAX,
+  AUDIO_ACTIVE_RMS, AUDIO_TAU_ON_FACTOR, AUDIO_OFF_FRAMES_FACTOR,
 });
 
 // ---------------------------------------------------------------------------
@@ -501,6 +525,11 @@ export class SottoEngine {
     this._segFrames = null;
     this._segTs = null;
     this._refractory = false; // after an over-long discard: wait for stillness
+    // Segment options + audio fusion (defaults preserve v0.1 behavior).
+    this._maxSegMs = MAX_SEG_MS;
+    this._splitOnMax = false;
+    this._audioLevelProvider = null;
+    this._audioProviderThrows = 0;
     this._faceOk = false;
     this._faceEverSeen = false;
     this._faceRegained = false;
@@ -660,6 +689,48 @@ export class SottoEngine {
       this._onCount = 0;
       this._offCount = 0;
     }
+  }
+
+  /**
+   * Configure segmentation limits. Omitted fields revert to their defaults,
+   * which reproduce v0.1 behavior exactly (maxSegMs 6000, splitOnMax false).
+   * @param {Object} [opts]
+   * @param {number} [opts.maxSegMs] utterance length limit in ms, clamped to
+   *        2000..30000 (the mic ring holds 30 s)
+   * @param {boolean} [opts.splitOnMax] when true, an utterance reaching
+   *        maxSegMs is emitted as a completed segment and the speaking state
+   *        continues into a fresh segment seeded from the last PRE_ROLL ring
+   *        frames — no discard, no refractory. When false (default), the
+   *        over-long utterance is discarded and stillness is required before
+   *        re-arming. Splitting never fires while a calibration recording is
+   *        armed; the discard behavior applies so phrase takes stay bounded.
+   * @returns {void}
+   */
+  setSegmentOptions(opts) {
+    const o = opts && typeof opts === 'object' ? opts : {};
+    const v = Number(o.maxSegMs);
+    this._maxSegMs = Number.isFinite(v) ? clamp(v, MAX_SEG_MS_MIN, MAX_SEG_MS_MAX) : MAX_SEG_MS;
+    this._splitOnMax = !!o.splitOnMax;
+  }
+
+  /**
+   * Install or clear the audio-level provider for audio+lip fusion (whisper
+   * mode). The provider is called at most once per processed frame from
+   * inside the segmentation step and must return the current mic RMS in
+   * 0..1 (e.g. SottoMic.level()). While the level is above AUDIO_ACTIVE_RMS
+   * the segment-start threshold drops to TAU_ON * 0.55 and the still frames
+   * required to end a segment double — but audio alone never starts a
+   * segment: energy is computed from lip motion only, and lips gate when
+   * the engine listens. A provider exception is treated as level 0; after 3
+   * consecutive exceptions the provider is auto-cleared. Non-function
+   * values (including null) restore lips-only segmentation (v0.1 behavior;
+   * phrases mode).
+   * @param {(() => number)|null} fn returns current mic RMS 0..1, or null
+   * @returns {void}
+   */
+  setAudioLevelProvider(fn) {
+    this._audioLevelProvider = typeof fn === 'function' ? fn : null;
+    this._audioProviderThrows = 0;
   }
 
   // -- calibration ----------------------------------------------------------
@@ -1147,8 +1218,14 @@ export class SottoEngine {
       if (e < TAU_OFF) this._refractory = false;
       return;
     }
+    // Audio+lip fusion: poll the provider at most once per frame. Energy is
+    // lips-only, so audio can only soften the thresholds below — it can
+    // never start a segment by itself.
+    const audioActive = this._audioLevelProvider !== null
+      && this._pollAudioLevel() > AUDIO_ACTIVE_RMS;
     if (!this._speaking) {
-      if (e > TAU_ON) {
+      const tauOn = audioActive ? TAU_ON * AUDIO_TAU_ON_FACTOR : TAU_ON;
+      if (e > tauOn) {
         this._onCount++;
         if (this._onCount >= ON_FRAMES) this._beginSegment();
       } else {
@@ -1159,17 +1236,83 @@ export class SottoEngine {
     // Active utterance: append the current frame (bounded copy — allowed).
     this._segFrames.push(Array.from(this._features));
     this._segTs.push(t);
-    if (t - this._segTs[0] > MAX_SEG_MS) {
-      this._discardSegment();
-      this._refractory = true;
+    if (t - this._segTs[0] > this._maxSegMs) {
+      if (this._splitOnMax && !this._pendingRecording) {
+        this._splitSegment();
+      } else {
+        // v0.1 behavior, kept as the default and during calibration
+        // recording so phrase takes stay bounded.
+        this._discardSegment();
+        this._refractory = true;
+      }
       return;
     }
+    // While audio stays active a lip-still moment needs twice the stillness
+    // to end the utterance (bounded: the maxSegMs check above runs first).
+    const offNeeded = audioActive ? OFF_FRAMES * AUDIO_OFF_FRAMES_FACTOR : OFF_FRAMES;
     if (e < TAU_OFF) {
       this._offCount++;
-      if (this._offCount >= OFF_FRAMES) this._endSegment();
+      if (this._offCount >= offNeeded) this._endSegment();
     } else {
       this._offCount = 0;
     }
+  }
+
+  /**
+   * Read the audio-level provider defensively. An exception counts as level
+   * 0, and after AUDIO_PROVIDER_MAX_THROWS consecutive exceptions the
+   * provider is cleared so a broken provider cannot poison every frame.
+   * Non-finite returns are treated as 0 (without counting as exceptions).
+   * @returns {number} current mic RMS clamped to 0..1, or 0
+   */
+  _pollAudioLevel() {
+    const fn = this._audioLevelProvider;
+    if (!fn) return 0;
+    let v;
+    try {
+      v = Number(fn());
+    } catch (err) {
+      if (++this._audioProviderThrows >= AUDIO_PROVIDER_MAX_THROWS) {
+        this._audioLevelProvider = null;
+        this._audioProviderThrows = 0;
+        console.warn('sotto: audio level provider cleared after repeated exceptions —', err);
+      }
+      return 0;
+    }
+    this._audioProviderThrows = 0;
+    return Number.isFinite(v) ? clamp01(v) : 0;
+  }
+
+  /**
+   * splitOnMax: the in-flight utterance reached maxSegMs. Emit it as a
+   * completed segment (recordingLabel handling unchanged — though splitting
+   * never fires while a recording is armed), then immediately continue the
+   * speaking state with a fresh segment seeded from the last PRE_ROLL ring
+   * frames, which overlap the emitted tail (deliberate closing/opening
+   * context). Energy and hysteresis counters carry over untouched; no
+   * refractory, no discard, no state change. A later true still-tail ends
+   * the final piece through _endSegment as usual.
+   * @returns {void}
+   */
+  _splitSegment() {
+    const frames = this._segFrames;
+    const ts = this._segTs;
+    const seg = {
+      frames,
+      t0: ts[0],
+      t1: ts[ts.length - 1],
+      durationMs: ts[ts.length - 1] - ts[0],
+    };
+    // Reseed before emitting so callbacks observe a consistent engine.
+    const take = Math.min(this._ringCount, PRE_ROLL);
+    this._segFrames = [];
+    this._segTs = [];
+    for (let k = take; k >= 1; k--) {
+      const idx = (this._ringHead - k + RING_SIZE * 2) % RING_SIZE;
+      this._segFrames.push(Array.from(this._ring[idx]));
+      this._segTs.push(this._ringTs[idx]);
+    }
+    this._finishSegment(seg);
   }
 
   _beginSegment() {
@@ -1201,16 +1344,18 @@ export class SottoEngine {
   _endSegment() {
     const frames = this._segFrames;
     const ts = this._segTs;
+    // The trailing still run is exactly _offCount consecutive sub-threshold
+    // frames (OFF_FRAMES in lips-only mode; up to double under audio
+    // fusion); keep a few as closing context and drop the rest so segments
+    // are not padded with 400 ms or more of nothing.
+    const stillRun = this._offCount;
     this._speaking = false;
     this._segFrames = null;
     this._segTs = null;
     this._onCount = 0;
     this._offCount = 0;
     this._setState('idle');
-    // The last OFF_FRAMES rows are consecutive sub-threshold stillness; keep
-    // a few as closing context and drop the rest so templates are not padded
-    // with 400 ms of nothing.
-    const keep = frames.length - (OFF_FRAMES - TAIL_KEEP);
+    const keep = frames.length - (stillRun - TAIL_KEEP);
     if (keep < MIN_SEG_FRAMES) return; // too short — discard silently
     frames.length = keep;
     ts.length = keep;

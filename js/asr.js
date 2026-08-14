@@ -3,17 +3,21 @@
  *
  * SottoASR runs the vendored Whisper model in a module worker
  * (js/asr-worker.js) so inference never blocks the UI thread. Fully
- * on-device: no network requests, nothing persisted, nothing uploaded.
+ * on-device: no network requests, nothing uploaded. The only thing
+ * persisted is the device-verdict record described below.
  *
  * Exports:
- *   SottoASR (default + named) — the wrapper class per SPEC-V2.md
+ *   SottoASR (default + named) — the wrapper class per SPEC-V2.md/SPEC-V3.md
  *   SottoASRError              — typed error with .code
  *   WASM_TIMEOUT_MS            — default transcribe timeout on the wasm path
  *
  * Usage:
  *   const asr = new SottoASR({ onStatus });
  *   await asr.load();                                   // idempotent
- *   const text = await asr.transcribe(float32, { timeoutMs: 30000 });
+ *   const text = await asr.transcribe(float32, {
+ *     timeoutMs: 30000,
+ *     onPartial: (text) => { ... },  // accumulated partial transcription
+ *   });
  *   asr.dispose();
  *
  * Device selection is automatic: webgpu when available, wasm otherwise,
@@ -24,7 +28,16 @@
  * { device: 'wasm' } to the constructor to skip webgpu entirely — useful
  * for benchmarking and for machines with known-bad GPU drivers.
  *
- * onStatus(status, detail) statuses:
+ * Device-verdict cache: when an 'auto' load ends demoted to wasm, the
+ * verdict is written to localStorage ('sotto.asr.verdict.v1') and later
+ * 'auto' loads pass 'wasm' straight to the worker — skipping the doomed
+ * webgpu attempt and its canary, which is most of a ~23 s cold load.
+ * Honored only for the same model id and for 14 days (GPU drivers change;
+ * re-probe occasionally). Where localStorage is unavailable or blocked
+ * (private mode), the cache silently does nothing.
+ *
+ * onStatus(status, detail) statuses (every status carries detail.model,
+ * the worker's model id):
  *   'loading-model'  detail.progress is 0-100 when transformers.js reports
  *                    it; detail.message is set when a stalled webgpu load
  *                    is being retried on wasm
@@ -64,6 +77,56 @@ export const WASM_TIMEOUT_MS = 60000;
 const LOAD_TIMEOUT_MS = 120000;
 
 // ---------------------------------------------------------------------------
+// Device-verdict cache
+// ---------------------------------------------------------------------------
+
+/** localStorage key for the persisted device verdict. */
+const VERDICT_KEY = 'sotto.asr.verdict.v1';
+
+/**
+ * How long a wasm-demotion verdict is trusted. GPU drivers and browser
+ * webgpu backends do improve; after this the webgpu path is probed again.
+ */
+const VERDICT_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * Read the stored verdict: { model, device: 'wasm', at } or null when
+ * absent, malformed, or expired (expired and malformed entries are also
+ * removed). Every storage failure — no localStorage, private mode,
+ * blocked access — reads as null: the cache is an optimization, never a
+ * dependency.
+ * @returns {{ model: string, device: 'wasm', at: number } | null}
+ */
+function readVerdict() {
+  try {
+    const raw = localStorage.getItem(VERDICT_KEY);
+    if (!raw) return null;
+    let v = null;
+    try { v = JSON.parse(raw); } catch { /* malformed: cleared below */ }
+    if (v && v.device === 'wasm' && typeof v.model === 'string' && v.model !== ''
+        && Number.isFinite(v.at) && Date.now() - v.at <= VERDICT_TTL_MS) {
+      return v;
+    }
+    localStorage.removeItem(VERDICT_KEY);
+  } catch { /* no usable storage: behave as uncached */ }
+  return null;
+}
+
+/** Persist a wasm-demotion verdict for the given model id. Silent no-op without storage. */
+function writeVerdict(model) {
+  try {
+    localStorage.setItem(VERDICT_KEY, JSON.stringify({ model, device: 'wasm', at: Date.now() }));
+  } catch { /* no usable storage: skip the cache */ }
+}
+
+/** Remove the stored verdict. Silent no-op without storage. */
+function clearVerdict() {
+  try {
+    localStorage.removeItem(VERDICT_KEY);
+  } catch { /* no usable storage: nothing to clear */ }
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -101,10 +164,11 @@ export class SottoASR {
     this._loadPromise = null;
     this._ready = false;
     this._device = null;      // 'webgpu' | 'wasm' | null
+    this._model = null;       // model id reported by the worker, e.g. 'base'
     this._disposed = false;
 
     this._nextId = 1;
-    this._pending = new Map(); // id -> {resolve, reject, timer?, stale}
+    this._pending = new Map(); // id -> {resolve, reject, onPartial?, timer?, stale}
     this._queue = [];          // transcribe jobs waiting to be sent
     this._inflightId = null;   // id of the transcribe job the worker holds
   }
@@ -117,6 +181,11 @@ export class SottoASR {
   /** True once load() has resolved (and dispose() has not been called). */
   get ready() {
     return this._ready;
+  }
+
+  /** Model id reported by the worker (e.g. 'base'); null until the worker has said. */
+  get model() {
+    return this._model;
   }
 
   /**
@@ -147,13 +216,20 @@ export class SottoASR {
    * on wasm (single-threaded wasm needs the headroom — see the constant).
    * Resolves with the transcription, or '' for silence/no-speech
    * (including suppressed Whisper silence hallucinations).
+   * While the worker decodes, onPartial (when given) is called with the
+   * ACCUMULATED partial text so far, throttled by the worker to at most
+   * one call per 120 ms. Partials are an enhancement: they may never
+   * arrive at all (no streamer available), exceptions thrown by the
+   * callback are swallowed, and partials for stale (timed-out) jobs are
+   * dropped. The resolved final text is the authority.
    * The input array is transferred, not copied — see module header.
    * @param {Float32Array} audio mono PCM at 16000 Hz
-   * @param {{ timeoutMs?: number }} [opts] an explicit timeoutMs overrides
-   *   the per-device default; 0 or a non-finite value disables the timeout
+   * @param {{ timeoutMs?: number, onPartial?: (text: string) => void }} [opts]
+   *   an explicit timeoutMs overrides the per-device default; 0 or a
+   *   non-finite value disables the timeout
    * @returns {Promise<string>}
    */
-  async transcribe(audio, { timeoutMs } = {}) {
+  async transcribe(audio, { timeoutMs, onPartial } = {}) {
     if (!(audio instanceof Float32Array)) {
       throw new SottoASRError('bad-input', 'transcribe() expects a Float32Array of 16 kHz mono PCM');
     }
@@ -167,7 +243,13 @@ export class SottoASR {
       throw new SottoASRError('disposed', 'SottoASR was disposed');
     }
     return new Promise((resolve, reject) => {
-      this._queue.push({ audio, timeoutMs, resolve, reject });
+      this._queue.push({
+        audio,
+        timeoutMs,
+        onPartial: typeof onPartial === 'function' ? onPartial : null,
+        resolve,
+        reject,
+      });
       this._pump();
     });
   }
@@ -201,6 +283,7 @@ export class SottoASR {
     this._loadPromise = null;
     this._ready = false;
     this._device = null;
+    this._model = null;
   }
 
   // -- internals ------------------------------------------------------------
@@ -227,11 +310,22 @@ export class SottoASR {
   }
 
   async _doLoad() {
+    // An 'auto' load honors a fresh stored wasm verdict: the doomed webgpu
+    // attempt and its canary are skipped and the worker goes straight to
+    // wasm. A verdict-driven wasm load behaves exactly like an explicit
+    // one, including no wasm-on-wasm retry after a stall.
+    let requested = this._preferredDevice;
+    let cached = null;
+    if (requested === 'auto') {
+      cached = readVerdict();
+      if (cached) requested = 'wasm';
+    }
     try {
-      await this._loadAttempt(this._preferredDevice);
+      await this._loadAttempt(requested);
+      this._settleVerdict(cached, requested);
       return;
     } catch (err) {
-      if (!this._isLoadStall(err) || this._preferredDevice === 'wasm') {
+      if (!this._isLoadStall(err) || requested === 'wasm') {
         throw this._terminalLoadError(err);
       }
     }
@@ -243,6 +337,32 @@ export class SottoASR {
     } catch (err) {
       throw this._terminalLoadError(err);
     }
+    this._settleVerdict(cached, requested);
+  }
+
+  /**
+   * Post-load verdict bookkeeping (every path is a silent no-op without
+   * localStorage). A verdict that was honored is validated against the
+   * model the worker just reported: a mismatch means the shipped model
+   * changed since it was written, so it is cleared and the NEXT 'auto'
+   * load probes webgpu again — this one already ran wasm; one conservative
+   * session is the price of not duplicating MODEL_ID outside the worker.
+   * A fresh 'auto' probe that ended demoted to wasm (webgpu failed the
+   * canary, threw, or stalled) writes the verdict so later sessions skip
+   * webgpu — but only when webgpu was actually on the table
+   * (navigator.gpu present).
+   * @param {{ model: string } | null} cached verdict honored by this load
+   * @param {'auto' | 'wasm'} requested device actually asked of the worker
+   */
+  _settleVerdict(cached, requested) {
+    if (cached) {
+      if (this._model && cached.model !== this._model) clearVerdict();
+      return;
+    }
+    if (requested !== 'auto') return;    // explicit wasm: nothing was probed
+    if (this._device !== 'wasm') return; // webgpu won: no demotion to record
+    if (typeof navigator === 'undefined' || !navigator.gpu) return; // webgpu never attempted
+    if (this._model) writeVerdict(this._model);
   }
 
   /**
@@ -276,6 +396,7 @@ export class SottoASR {
     try {
       const payload = await result;
       this._device = payload.device || this._device;
+      if (typeof payload.model === 'string' && payload.model !== '') this._model = payload.model;
       this._ready = true;
     } catch (err) {
       if (err instanceof SottoASRError) throw err;
@@ -310,7 +431,20 @@ export class SottoASR {
     if (msg.type === 'status') {
       const { status, ...detail } = msg.payload || {};
       if (detail.device) this._device = detail.device;
+      if (typeof detail.model === 'string' && detail.model !== '') this._model = detail.model;
       this._emitStatus(status, detail);
+      return;
+    }
+
+    if (msg.type === 'partial') {
+      // Streaming partial for an in-flight transcribe job. Dropped when
+      // the job is unknown or stale (timed out), or asked for no partials.
+      const entry = this._pending.get(msg.id);
+      if (!entry || entry.stale || !entry.onPartial) return;
+      const text = msg.payload && typeof msg.payload.text === 'string' ? msg.payload.text : '';
+      try {
+        entry.onPartial(text);
+      } catch { /* never let a listener break the pipeline */ }
       return;
     }
 
@@ -353,6 +487,7 @@ export class SottoASR {
     const entry = {
       resolve: (payload) => job.resolve(typeof payload.text === 'string' ? payload.text : ''),
       reject: job.reject,
+      onPartial: job.onPartial,
       stale: false,
       timer: undefined,
     };

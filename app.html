@@ -82,7 +82,7 @@
           </div>
 
           <div class="asr-note" id="asr-note" role="status" hidden>
-            <span id="asr-note-text">Loading speech model — ~75MB, one time.</span>
+            <span id="asr-note-text">Loading the speech model. First ever load fetches ~75MB; after that it comes from cache.</span>
             <span class="asr-progress" id="asr-progress" hidden aria-hidden="true"><i id="asr-progress-fill"></i></span>
           </div>
 
@@ -132,6 +132,8 @@
 
     <!-- ============ workspace column (7/12) ============ -->
     <section class="col-work" aria-labelledby="pad-h">
+
+      <p class="ticker" id="ticker" aria-live="polite" hidden></p>
 
       <div class="card pad-card">
         <div class="pad-head">

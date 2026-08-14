@@ -58,6 +58,7 @@ const asrNote = $('asr-note');
 const asrNoteText = $('asr-note-text');
 const asrProgress = $('asr-progress');
 const asrProgressFill = $('asr-progress-fill');
+const ticker = $('ticker');
 const micEmpty = $('mic-empty');
 const micEmptyTitle = $('mic-empty-title');
 const micEmptyBody = $('mic-empty-body');
@@ -124,7 +125,7 @@ const whisper = {
   asr: null,        // SottoASR instance, created lazily on first entry
   modPromise: null, // Promise for the dynamic imports of audio.js + asr.js
   ready: false,     // ASR has reported ready at least once (it stays loaded)
-  queue: [],        // pending audio slices (Float32Array); cap 2, drop oldest
+  queue: [],        // pending audio slices (Float32Array); cap 3, drop oldest
   busy: false,      // one transcribe call in flight
   droppedToast: false, // "transcriber is behind" toast shown at most once
   device: null,     // 'gpu' | 'cpu' once known
@@ -444,9 +445,7 @@ function renderPractice(stats, accepted) {
 
 const engine = new SottoEngine({
   onState(state, detail) {
-    const prev = engineState;
     engineState = state;
-    trackLongUtterance(prev, state);
     switch (state) {
       case 'loading':
         hideCamEmpty();
@@ -610,16 +609,21 @@ sensitivity.addEventListener('input', () => {
 pauseToggle.addEventListener('change', () => {
   engine.setPaused(pauseToggle.checked);
   if (pauseToggle.checked && mode === 'whisper') {
-    // Pause means pause: queued audio does not outlive it, and an in-flight
-    // result is dropped when it lands (see pumpTranscribe).
+    // Pause means pause: queued audio does not outlive it, an in-flight
+    // result is dropped when it lands (see pumpTranscribe), and the ticker
+    // stops streaming its partials.
     whisper.queue.length = 0;
+    clearTicker();
   }
   renderStatus();
 });
 
 /* ---------------------------------------------------------------- whisper mode */
 
-const ASR_LOADING_TEXT = 'Loading speech model — ~75MB, one time.';
+// One honest line: app.js cannot reliably tell a first-ever load (network
+// fetch) from a cached one, so the copy covers both without overpromising.
+const ASR_LOADING_TEXT =
+  'Loading the speech model. First ever load fetches ~75MB; after that it comes from cache.';
 
 const PRIVACY_PHRASES =
   'Phrase mode: camera only. No audio is captured; frames are processed on this device and discarded.';
@@ -735,6 +739,13 @@ async function enterWhisper() {
       return;
     }
     startMicMeter();
+    // Whisper-mode segmentation: split long utterances instead of discarding
+    // them, and let the live mic level loosen/hold the lip gate (SPEC-V3 §3-4).
+    // Guarded: the engine API may lag this wiring during development.
+    if (engine.setSegmentOptions) engine.setSegmentOptions({ splitOnMax: true });
+    if (engine.setAudioLevelProvider) {
+      engine.setAudioLevelProvider(() => (whisper.mic && whisper.mic.running ? whisper.mic.level() : 0));
+    }
     if (!whisper.ready) showAsrNote(ASR_LOADING_TEXT, null);
     await whisper.asr.load();
     if (session !== whisper.session) return;
@@ -767,7 +778,12 @@ function leaveWhisper() {
   whisper.deferred = false; // a deliberate move to Phrases cancels a deferred entry
   whisper.queue.length = 0;
   whisper.busy = false;
-  cancelLongUtterToast();
+  clearTicker();
+  // Back to v0.1 segmentation: lips-only gating, discard past MAX_SEG_MS.
+  if (engine.setSegmentOptions) {
+    engine.setSegmentOptions({ maxSegMs: CONSTANTS.MAX_SEG_MS, splitOnMax: false });
+  }
+  if (engine.setAudioLevelProvider) engine.setAudioLevelProvider(null);
   if (whisper.mic) {
     try { whisper.mic.stop(); } catch { /* already stopped */ }
   }
@@ -795,7 +811,6 @@ function runDeferredWhisper() {
 /* ------- fusion: lip segment -> audio slice -> transcription ------- */
 
 function handleWhisperSegment(seg) {
-  cancelLongUtterToast(); // a segment arrived, so the utterance was not discarded
   if (!whisper.mic || !whisper.mic.running || !whisper.asr || !whisper.ready) return;
   let audio;
   try {
@@ -805,7 +820,7 @@ function handleWhisperSegment(seg) {
   }
   if (!audio || !audio.length) return;
   whisper.queue.push(audio);
-  while (whisper.queue.length > 2) {
+  while (whisper.queue.length > 3) {
     whisper.queue.shift();
     if (!whisper.droppedToast) {
       whisper.droppedToast = true;
@@ -824,7 +839,15 @@ function pumpTranscribe() {
   const audio = whisper.queue.shift();
   whisper.busy = true;
   renderStatus();
-  whisper.asr.transcribe(audio).then((text) => {
+  whisper.asr.transcribe(audio, {
+    // Accumulated partial text of this job, streamed from the decoder. Stale
+    // sessions and paused states stay silent; the final result supersedes.
+    onPartial: (text) => {
+      if (session !== whisper.session) return;
+      if (pauseToggle.checked) return;
+      setTicker(text);
+    },
+  }).then((text) => {
     if (session !== whisper.session) return;
     // Pause honesty: while the pill says "paused", a result that was already
     // in flight must not reach the pad, a toast, or the clipboard.
@@ -839,6 +862,7 @@ function pumpTranscribe() {
     toast('transcription failed', null, 'bad');
   }).then(() => {
     if (session !== whisper.session) return;
+    clearTicker(); // this job is settled either way; the pad holds the final text
     whisper.busy = false;
     renderStatus();
     pumpTranscribe();
@@ -851,43 +875,21 @@ function toastTranscript(text) {
   toast(words.length > 4 ? `${head}…` : head, null);
 }
 
-/* ------- long-utterance feedback ------- */
+/* ------- live ticker ------- */
 
-// The engine discards any utterance longer than MAX_SEG_MS without emitting a
-// segment, which in Whisper mode reads as words silently vanishing. Time the
-// 'speaking' state app-side and say why nothing landed. The threshold sits
-// below MAX_SEG_MS because the engine's segment clock starts on pre-roll
-// frames captured before the state flips to 'speaking'.
-const LONG_UTTER_MS = CONSTANTS.MAX_SEG_MS - 400;
-let speakingSince = 0;     // performance.now() when 'speaking' began
-let longUtterTimer = null; // pending "ran long" toast; an arriving segment cancels it
+// A single line above the pad showing the currently-decoding job's accumulated
+// partial text (Whisper mode only — nothing else writes to it). Empty and
+// hidden whenever no job is streaming.
 
-/**
- * Called on every engine state transition (from onState).
- * @param {string} prev previous engine state
- * @param {string} state new engine state
- */
-function trackLongUtterance(prev, state) {
-  if (state === 'speaking' && prev !== 'speaking') {
-    speakingSince = performance.now();
-    return;
-  }
-  if (prev !== 'speaking' || state === 'speaking') return;
-  if (mode !== 'whisper' || simulated) return;
-  if (performance.now() - speakingSince <= LONG_UTTER_MS) return;
-  // Give a real segment 500 ms to arrive before concluding it was discarded.
-  clearTimeout(longUtterTimer);
-  longUtterTimer = setTimeout(() => {
-    longUtterTimer = null;
-    toast('that ran past six seconds — pause briefly between sentences', null, 'miss');
-  }, 500);
+function setTicker(text) {
+  const t = (text || '').trim();
+  ticker.textContent = t;
+  ticker.hidden = t === '';
 }
 
-function cancelLongUtterToast() {
-  if (longUtterTimer) {
-    clearTimeout(longUtterTimer);
-    longUtterTimer = null;
-  }
+function clearTicker() {
+  ticker.textContent = '';
+  ticker.hidden = true;
 }
 
 /* ------- ASR status + settings info ------- */
