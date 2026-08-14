@@ -215,12 +215,6 @@ Directions under exploration — not promises:
 - A proper study of vocabulary size vs. accuracy, published with the numbers,
   whatever they turn out to be.
 
-## Author
-
-Sotto is built by Nolan Woo ([@JelloCello30](https://github.com/JelloCello30)),
-a cellist. It started with wanting to answer messages mid-practice; the cello
-takes both hands and does not negotiate.
-
 ## License
 
 All rights reserved (prototype). This is research-preview code, provided to look
