@@ -69,6 +69,24 @@ const asrInfo = $('asr-info');
 const settingsBtn = $('settings-btn');
 const settingsDrawer = $('settings-drawer');
 const settingsClose = $('settings-close');
+const diagToggle = $('diag-toggle');
+const diagCopy = $('diag-copy');
+const diagHud = $('diag-hud');
+const diagFps = $('diag-fps');
+const diagEnergy = $('diag-energy');
+const diagEnergyFill = $('diag-energy-fill');
+const diagTickOn = $('diag-tick-on');
+const diagTickOff = $('diag-tick-off');
+const diagTau = $('diag-tau');
+const diagMic = $('diag-mic');
+const diagMicFill = $('diag-mic-fill');
+const diagTickBar = $('diag-tick-bar');
+const diagBarNum = $('diag-bar-num');
+const diagFloor = $('diag-floor');
+const diagAsr = $('diag-asr');
+const diagLib = $('diag-lib');
+const diagEventsEl = $('diag-events');
+const diagEmpty = $('diag-empty');
 const selftestBtn = $('selftest-btn');
 const selftestOut = $('selftest-out');
 const selftestMsg = $('selftest-msg');
@@ -129,9 +147,15 @@ const voice = {
   model: null,      // model name once known
 };
 
-/* ------- per-utterance routing (v0.4) ------- */
+/* ------- per-utterance routing (SPEC-V5 §2) ------- */
 
-const PHRASE_FAST_CONF = 0.80;   // instant-path confidence bar (SPEC-V4 rule 2)
+// v0.5 deletes the v0.4 instant-path gate (PHRASE_FAST_CONF 0.80): it was
+// miscalibrated by construction — confidence = 1 - d/(2*tau_accept), so a
+// good match at half the accept threshold scores 0.75 and failed the gate
+// even though the engine accepted it with margin. Silent segments now type
+// on acceptance alone; only VOICED segments keep a confidence bar, because
+// there audio is ground truth and Whisper is the better fallback.
+const PHRASE_VOICED_CONF = 0.60; // voiced instant-path bar (SPEC-V5 rule 2b)
 const LEARNED_MAX = 40;          // cap on auto-learned phrases
 const LEARN_TOAST_MS = 10000;    // at most one "learned" toast per 10 s
 const HINT_THROTTLE_MS = 30000;  // silent-miss hint at most once per 30 s
@@ -139,10 +163,30 @@ const HINT_SHOW_MS = 4000;
 const HINT_TEXT = "couldn't read that silently — whisper it once and Sotto learns it";
 const LEARN_LABEL_RE = /^[\p{L}\p{N}' -]+$/u;
 
+/* Voiced bar (SPEC-V5 §2): a segment counts as voiced when its mean mic RMS
+   clears max(VOICED_BAR_MIN, micFloor * MIC_FLOOR_FACTOR), where micFloor is
+   a rolling p50 of mic.level() sampled ~4x/s while the engine is idle. This
+   replaces the fixed CONSTANTS.AUDIO_ACTIVE_RMS comparison in routing (the
+   engine's internal fusion assist keeps its own constant). The bar decides
+   rule ORDER only, never correctness — a mis-gated whisper is recovered by
+   the speculative pass. */
+const VOICED_BAR_MIN = 0.008;       // cold start: the bar rests here
+const MIC_FLOOR_FACTOR = 3;
+const MIC_FLOOR_INTERVAL_MS = 250;  // ~4 samples per second
+const MIC_FLOOR_RING_N = 40;        // ~10 s of idle samples
+const MIC_FLOOR_MIN_SAMPLES = 8;    // below this the floor reads 0 (cold start)
+
+/* Correction loop (SPEC-V5 §3): one slot holding the most recent
+   unmatched-silent segment, consumed by the next qualifying Whisper final. */
+const CORRECTION_WINDOW_MS = 8000;
+const CORRECTION_RATIO_MIN = 0.5;
+const CORRECTION_RATIO_MAX = 2;
+
 let pendingSeg = null; // buffered in onSegment; consumed by the onMatch that follows
 let hintShownAt = 0;
 let hintTimer = null;
 let learnToastAt = 0;
+let missSlot = null;   // { frames, t1, durationMs } — SPEC-V5 §3, one slot
 
 const cal = {
   open: false,
@@ -490,6 +534,7 @@ const engine = new SottoEngine({
     drawWave();
     if (voice.mic && voice.mic.running) updateMicMeter();
     else checkMicDisconnect();
+    diagFrame(frame); // one boolean check while diagnostics are off
     const now = performance.now();
     if (now - lastFpsAt > 500) {
       lastFpsAt = now;
@@ -544,25 +589,44 @@ const engine = new SottoEngine({
 });
 
 /**
- * v0.4 single-point router (SPEC-V4 §2). Runs once per completed
+ * v0.5 single-point router (SPEC-V5 §2). Runs once per completed
  * non-recording segment, with the segment and its DTW match both in hand.
- * Rule order — first hit wins:
- *   2. a confident phrase (>= PHRASE_FAST_CONF) types instantly, silent or
- *      voiced, and never goes to the transcriber;
- *   3. a voiced segment (audioLevel >= AUDIO_ACTIVE_RMS) with voice assist
- *      ready goes to the Whisper path;
- *   4. anything else types nothing — a low-confidence match would type wrong
- *      words, so the throttled silent-miss hint explains the learning loop.
+ * The voiced bar decides rule ORDER only — never correctness. First hit wins:
+ *   2a. silent segment, engine accepted a match: type it instantly.
+ *       Acceptance already encodes threshold + margin — no secondary
+ *       confidence gate (v0.4's 0.80 bar dropped good matches by design).
+ *   2b. voiced segment, match at confidence >= 0.60: type instantly —
+ *       a strong phrase beats Whisper for speed and consistency.
+ *   3.  voiced otherwise, assist ready: Whisper (audio is ground truth
+ *       when we have it).
+ *   4.  silent miss, assist ready: DO NOT give up — slice the audio window
+ *       anyway and send it to Whisper (the speculative pass). Real whispers
+ *       mis-gated by the voiced bar are recovered; genuine silence returns
+ *       '' via the worker's silence suppression, and only then the hint
+ *       shows. The transcribing pill shows meanwhile — it is true.
+ *       Mic off or ASR not ready: hint directly (and the miss is kept for
+ *       the correction loop, SPEC-V5 §3).
  * (Rule 1, calibration takes, never reaches this function — see onSegment.)
  */
 function routeSegment(m, seg) {
+  const voiced = Number(seg.audioLevel) >= voicedBar();
+  const instant = !!m && (!voiced || m.confidence >= PHRASE_VOICED_CONF);
+
   if (practiceToggle.checked) {
     let stats = [];
     try { stats = engine.matchStats(seg); } catch { stats = []; }
-    renderPractice(stats, m && m.confidence >= PHRASE_FAST_CONF ? m : null);
+    renderPractice(stats, instant ? m : null);
   }
 
-  if (m && m.confidence >= PHRASE_FAST_CONF) {
+  const base = { kind: 'segment', durMs: Math.round(seg.durationMs), level: Number(seg.audioLevel) || 0 };
+  if (m) {
+    base.label = m.label;
+    base.distance = m.distance;
+    base.confidence = m.confidence;
+  }
+
+  if (instant) {
+    recordEvent({ ...base, route: 'phrase' });
     appendToPad(m.label);
     toast(m.label, fmtConf(m.confidence));
     // Instant use freshens the phrase for learned-cap eviction ordering.
@@ -572,18 +636,131 @@ function routeSegment(m, seg) {
     return;
   }
 
-  const voiced = Number(seg.audioLevel) >= CONSTANTS.AUDIO_ACTIVE_RMS;
-  if (voiced && voiceEnabled && voice.ready && voice.mic && voice.mic.running && voice.asr) {
-    queueVoiceSegment(seg);
+  const assistReady = voiceEnabled && voice.ready
+    && voice.mic && voice.mic.running && voice.asr;
+
+  if (voiced && assistReady) {
+    // Record what actually happened: a failed slice (mic ring too fresh for
+    // the window) must not log a phantom transcription pass.
+    if (queueVoiceSegment(seg)) {
+      recordEvent({ ...base, route: 'whisper' });
+    } else {
+      recordEvent({ ...base, route: 'whisper-failed' });
+    }
     return;
   }
 
+  if (!voiced && assistReady && queueVoiceSegment(seg, { speculative: true })) {
+    recordEvent({ ...base, route: 'speculative' });
+    return;
+  }
+
+  // Mic off, ASR not ready, or the slice failed: the miss is final now.
+  recordEvent({ ...base, route: 'hint' });
+  if (!voiced) setMissSlot(seg);
   showSilentMissHint();
+}
+
+/* ------- voiced bar: adaptive mic floor (SPEC-V5 §2) ------- */
+
+// micFloor is a rolling p50 of mic.level(), sampled ~4x/s but only while the
+// engine is idle — the user's own speech must never raise the floor. The
+// ring holds ~10 s of samples; a fresh mic session starts cold. Below
+// MIC_FLOOR_MIN_SAMPLES the floor reads 0, so the voiced bar rests at its
+// VOICED_BAR_MIN cold-start value (0.008).
+
+const micFloorSamples = [];
+let micFloorTimer = 0;
+
+function micFloor() {
+  const n = micFloorSamples.length;
+  if (n < MIC_FLOOR_MIN_SAMPLES) return 0;
+  const sorted = micFloorSamples.slice().sort((a, b) => a - b);
+  return sorted[Math.floor(n / 2)];
+}
+
+function voicedBar() {
+  return Math.max(VOICED_BAR_MIN, micFloor() * MIC_FLOOR_FACTOR);
+}
+
+/** One raw sample: poll mic.level() into the ring (no idle check here). */
+function micFloorSample() {
+  if (!voice.mic || !voice.mic.running) return;
+  let lvl;
+  try { lvl = Number(voice.mic.level()); } catch { return; }
+  if (!Number.isFinite(lvl)) return;
+  micFloorSamples.push(lvl);
+  if (micFloorSamples.length > MIC_FLOOR_RING_N) micFloorSamples.shift();
+}
+
+/** Interval body: sample only while idle (never during 'speaking'). */
+function micFloorTick() {
+  // Paused segmentation keeps engineState at 'idle' even while the user talks
+  // freely — do not let that speech poison the floor (it would inflate the
+  // voiced bar for ~10s after unpausing).
+  if (pauseToggle.checked) return;
+  if (engineState === 'idle' || engineState === 'ready') micFloorSample();
+}
+
+function startMicFloor() {
+  if (!micFloorTimer) micFloorTimer = setInterval(micFloorTick, MIC_FLOOR_INTERVAL_MS);
+}
+
+function stopMicFloor() {
+  if (micFloorTimer) {
+    clearInterval(micFloorTimer);
+    micFloorTimer = 0;
+  }
+  micFloorSamples.length = 0; // next mic session starts cold
+}
+
+/* ------- correction slot (SPEC-V5 §3) ------- */
+
+/** Remember a confirmed silent miss so the next qualifying Whisper final can
+ *  teach its frames too. One slot; newer misses overwrite. */
+function setMissSlot(seg) {
+  missSlot = { frames: seg.frames, t1: seg.t1, durationMs: seg.durationMs };
+}
+
+/**
+ * After a Whisper final auto-learned `label` from the voiced segment `seg`:
+ * if the slot holds a silent miss whose t1 is inside the 8 s window and
+ * whose duration is within [0.5x, 2x] of the voiced segment's, enroll the
+ * SILENT frames under the same label (second enrollSegment, learned: true),
+ * then clear the slot. No extra toast — the primary learn's toast stands.
+ * This teaches true silent articulation, which differs measurably from
+ * voiced articulation of the same words.
+ */
+function maybeCorrectionEnroll(label, seg) {
+  if (!missSlot) return;
+  if (performance.now() - missSlot.t1 > CORRECTION_WINDOW_MS) {
+    missSlot = null; // expired — never consume a stale take
+    return;
+  }
+  const dur = Number(seg && seg.durationMs);
+  if (!(dur > 0)) return;
+  const ratio = missSlot.durationMs / dur;
+  if (!(ratio >= CORRECTION_RATIO_MIN && ratio <= CORRECTION_RATIO_MAX)) return;
+  try {
+    engine.enrollSegment(label, missSlot.frames, { learned: true });
+  } catch {
+    return; // best-effort, like all learning
+  }
+  missSlot = null;
+  recordEvent({ kind: 'learn', label, silent: true });
+  refreshPhrasebook();
 }
 
 let lastFpsAt = 0;
 
-window.__sotto = { engine, voice };
+window.__sotto = {
+  engine, voice,
+  // Diagnostics + test surface (v0.5): read-only views and the raw floor
+  // sampler, so synthetic tests can exercise the adaptive bar without a mic.
+  micFloor, voicedBar, micFloorSample,
+  missSlot: () => missSlot,
+  events: () => diagEvents.slice(),
+};
 
 /* ---------------------------------------------------------------- camera control */
 
@@ -767,6 +944,7 @@ async function startVoiceAssist() {
     }
     micBlocked = false;
     startMicMeter();
+    startMicFloor();
     renderMicChip();
     renderPrivacy();
     // Fusion wiring: the live mic level loosens/holds the lip gate. splitOnMax
@@ -810,12 +988,14 @@ function stopVoiceAssist() {
   voice.starting = false;
   voice.queue.length = 0;
   voice.busy = false;
+  missSlot = null; // SPEC-V5 §3: the slot dies with the session (camera stop / voice off)
   clearTicker();
   if (engine.setAudioLevelProvider) engine.setAudioLevelProvider(null);
   if (voice.mic) {
     try { voice.mic.stop(); } catch { /* already stopped */ }
   }
   stopMicMeter();
+  stopMicFloor();
   hideAsrNote();
   renderMicChip();
   renderPrivacy();
@@ -845,17 +1025,23 @@ function renderPrivacy() {
 
 /* ------- fusion: lip segment -> audio slice -> transcription ------- */
 
-function queueVoiceSegment(seg) {
-  if (!voice.mic || !voice.mic.running || !voice.asr || !voice.ready) return;
+/**
+ * Slice the segment's audio window and queue it for transcription. The
+ * speculative flag (SPEC-V5 rule 4) marks a silent-miss pass: its '' result
+ * confirms the miss (slot + hint) instead of being silently ignored.
+ * @returns {boolean} true when a job was queued
+ */
+function queueVoiceSegment(seg, { speculative = false } = {}) {
+  if (!voice.mic || !voice.mic.running || !voice.asr || !voice.ready) return false;
   let audio;
   try {
     audio = voice.mic.slice(seg.t0 - 250, seg.t1 + 250);
   } catch {
-    return;
+    return false;
   }
-  if (!audio || !audio.length) return;
+  if (!audio || !audio.length) return false;
   // The segment rides along so a final text can auto-learn from its frames.
-  voice.queue.push({ audio, seg });
+  voice.queue.push({ audio, seg, speculative });
   while (voice.queue.length > 3) {
     voice.queue.shift();
     if (!voice.droppedToast) {
@@ -864,6 +1050,7 @@ function queueVoiceSegment(seg) {
     }
   }
   pumpTranscribe();
+  return true;
 }
 
 function pumpTranscribe() {
@@ -873,6 +1060,7 @@ function pumpTranscribe() {
   }
   const session = voice.session;
   const job = voice.queue.shift();
+  let speculativeMiss = false; // this job was a speculative pass and came back ''
   voice.busy = true;
   renderStatus();
   voice.asr.transcribe(job.audio, {
@@ -889,12 +1077,21 @@ function pumpTranscribe() {
     // in flight must not reach the pad, a toast, or the clipboard.
     if (pauseToggle.checked) return;
     const clean = (text || '').trim();
+    recordEvent({ kind: 'whisper', text: clean.slice(0, 80) });
     if (clean) {
       appendToPad(clean); // verbatim beyond appendToPad's usual sentence-start casing
       toastTranscript(clean);
       // The pad received it — this piece's own final text may now teach the
-      // silent vocabulary from this piece's own frames (SPEC-V4 §3).
-      maybeAutoLearn(clean, job.seg);
+      // silent vocabulary from this piece's own frames (SPEC-V4 §3), and a
+      // recent silent miss may ride along (SPEC-V5 §3).
+      const learnedLabel = maybeAutoLearn(clean, job.seg);
+      if (learnedLabel) maybeCorrectionEnroll(learnedLabel, job.seg);
+    } else if (job.speculative) {
+      // The speculative pass came back empty: the segment really was silent.
+      // Only now is the miss real — keep it for the correction loop and show
+      // the hint once this job has settled (SPEC-V5 rule 4).
+      setMissSlot(job.seg);
+      speculativeMiss = true;
     }
   }).catch(() => {
     if (session !== voice.session) return;
@@ -904,6 +1101,7 @@ function pumpTranscribe() {
     clearTicker(); // this job is settled either way; the pad holds the final text
     voice.busy = false;
     renderStatus();
+    if (speculativeMiss) showSilentMissHint(); // its own guard skips it if more jobs stream
     pumpTranscribe();
   });
 }
@@ -925,16 +1123,19 @@ function strippedLearnLabel(text) {
  * best-effort and silent on failure; at most one "learned" toast per 10 s,
  * and only for a first-time label. Guarded on engine.enrollSegment so a
  * lagging engine build degrades to no-op.
+ * @returns {string|null} the enrolled label (existing casing) on success, so
+ *          the correction loop (SPEC-V5 §3) can teach the same label — null
+ *          when any guard failed or enrollment did not happen
  */
 function maybeAutoLearn(text, seg) {
-  if (typeof engine.enrollSegment !== 'function') return;
-  if (!seg || !Array.isArray(seg.frames) || seg.frames.length < 2) return;
+  if (typeof engine.enrollSegment !== 'function') return null;
+  if (!seg || !Array.isArray(seg.frames) || seg.frames.length < 2) return null;
   const dur = Number(seg.durationMs);
-  if (!(dur >= 400 && dur <= 3000)) return;
+  if (!(dur >= 400 && dur <= 3000)) return null;
   const stripped = strippedLearnLabel(text);
-  if (stripped.length < 2 || stripped.length > 40) return;
-  if (!LEARN_LABEL_RE.test(stripped)) return;
-  if (stripped.split(' ').length > 4) return; // 1-4 words (never 0 after the strip)
+  if (stripped.length < 2 || stripped.length > 40) return null;
+  if (!LEARN_LABEL_RE.test(stripped)) return null;
+  if (stripped.split(' ').length > 4) return null; // 1-4 words (never 0 after the strip)
   const label = stripped.toLowerCase();
 
   const lib = libraryOf();
@@ -949,24 +1150,26 @@ function maybeAutoLearn(text, seg) {
     // with nothing learned to evict skips enrollment silently.
     const learned = lib.filter((p) => p.learned === true);
     if (learned.length >= LEARNED_MAX || lib.length >= CONSTANTS.MAX_PHRASES) {
-      if (!learned.length) return;
+      if (!learned.length) return null;
       let oldest = learned[0];
       for (const p of learned) {
         if (((p.lastUsedAt ?? p.createdAt) || 0) < ((oldest.lastUsedAt ?? oldest.createdAt) || 0)) {
           oldest = p;
         }
       }
-      try { engine.deletePhrase(oldest.label); } catch { return; }
+      try { engine.deletePhrase(oldest.label); } catch { return null; }
     }
   }
+  const finalLabel = existing ? existing.label : label;
   try {
     // Existing label (calibrated or learned): adds a take under the existing
     // casing, engine evicts take 0 at the cap. New label: created flagged
     // learned.
-    engine.enrollSegment(existing ? existing.label : label, seg.frames, { learned: true });
+    engine.enrollSegment(finalLabel, seg.frames, { learned: true });
   } catch {
-    return; // invalid frames or a race on the caps — enrollment is best-effort
+    return null; // invalid frames or a race on the caps — enrollment is best-effort
   }
+  recordEvent({ kind: 'learn', label: finalLabel });
   refreshPhrasebook();
   if (!existing) {
     const now = Date.now();
@@ -975,6 +1178,7 @@ function maybeAutoLearn(text, seg) {
       toast(`learned "${label}" — mouth it silently next time`, null);
     }
   }
+  return finalLabel;
 }
 
 function toastTranscript(text) {
@@ -1698,6 +1902,181 @@ function reportSelfTest(m, seg) {
   }
 }
 
+/* ---------------------------------------------------------------- diagnostics (SPEC-V5 §4) */
+
+// Event ring: always recorded (a push and a shift — cheap assignments), so a
+// report has content even when the HUD was off while the problem happened.
+// DOM work only happens while the toggle is on. HUD shows the last 5, the
+// report carries the last 20.
+
+const DIAG_EVENTS_MAX = 20;
+const DIAG_EVENTS_SHOWN = 5;
+const DIAG_FRAME_MS = 150; // live-readout refresh cadence (frames arrive faster)
+
+const diagEvents = [];
+let diagOn = false;
+let diagLastLiveAt = 0;
+
+/** Push an event into the ring; render only when the HUD is visible. */
+function recordEvent(ev) {
+  ev.t = Date.now();
+  diagEvents.push(ev);
+  if (diagEvents.length > DIAG_EVENTS_MAX) diagEvents.shift();
+  if (diagOn) {
+    renderDiagEvents();
+    renderDiagStatic(); // library counts change with learn events
+  }
+}
+
+function fmtDiagNum(v, digits) {
+  return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(digits) : '—';
+}
+
+/** One plain-text line per event, for the HUD list. */
+function diagEventLine(ev) {
+  switch (ev.kind) {
+    case 'segment': {
+      let s = `seg ${ev.durMs}ms lvl ${fmtDiagNum(ev.level, 3)} -> ${ev.route}`;
+      if (ev.label != null) {
+        s += ` "${ev.label}" d ${fmtDiagNum(ev.distance, 3)} conf ${fmtDiagNum(ev.confidence, 2)}`;
+      } else if (ev.route === 'hint') {
+        s += ' (no match)';
+      }
+      return s;
+    }
+    case 'whisper':
+      return ev.text ? `whisper "${ev.text}"` : "whisper '' (silence)";
+    case 'learn':
+      return ev.silent ? `learned "${ev.label}" (silent take)` : `learned "${ev.label}"`;
+    default:
+      return JSON.stringify(ev);
+  }
+}
+
+function renderDiagEvents() {
+  diagEventsEl.textContent = '';
+  const shown = diagEvents.slice(-DIAG_EVENTS_SHOWN).reverse(); // newest first
+  diagEmpty.hidden = shown.length > 0;
+  for (const ev of shown) {
+    const li = document.createElement('li');
+    li.textContent = diagEventLine(ev);
+    diagEventsEl.appendChild(li);
+  }
+}
+
+/** Floor, ASR, and library lines — cheap, refreshed with events and frames. */
+function renderDiagStatic() {
+  let d = null;
+  if (typeof engine.getDiagnostics === 'function') {
+    try { d = engine.getDiagnostics(); } catch { d = null; }
+  }
+  if (d && typeof d === 'object') {
+    const tag = d.adaptive ? '' : ' (fixed thresholds)';
+    diagFloor.textContent = `floor p50 ${fmtDiagNum(d.floorP50, 4)} · p90 ${fmtDiagNum(d.floorP90, 4)}`
+      + ` · samples ${Number.isFinite(d.samples) ? d.samples : '—'}${tag}`;
+  } else {
+    diagFloor.textContent = 'floor — (engine reports no adaptive state)';
+  }
+  diagAsr.textContent = voice.ready
+    ? `asr ${voice.model || 'model loaded'} · ${voice.device || 'device —'} · ready`
+    : (voiceEnabled ? 'asr not loaded' : 'asr off');
+  const lib = libraryOf();
+  const learned = lib.filter((p) => p.learned === true).length;
+  diagLib.textContent = `library ${lib.length - learned} taught · ${learned} learned`;
+}
+
+/**
+ * Live rows. The energy/tauOn/tauOff fields are SPEC-V5 §1 FrameInfo
+ * additions; when the running engine build lacks them, the thresholds shown
+ * are the fixed constants (which then ARE the live values) and energy reads
+ * as a dash. Bars are scaled relative to their own threshold so the tick
+ * marks land at meaningful positions.
+ */
+function updateDiagLive(frame) {
+  diagFps.textContent = frame && Number.isFinite(frame.fps)
+    ? `${Math.round(frame.fps)} fps` : '— fps';
+  const tauOn = frame && typeof frame.tauOn === 'number' ? frame.tauOn : CONSTANTS.TAU_ON;
+  const tauOff = frame && typeof frame.tauOff === 'number' ? frame.tauOff : CONSTANTS.TAU_OFF;
+  const energy = frame && typeof frame.energy === 'number' ? frame.energy : null;
+  diagEnergy.textContent = fmtDiagNum(energy, 4);
+  diagTau.textContent = `on ${fmtDiagNum(tauOn, 4)} · off ${fmtDiagNum(tauOff, 4)}`;
+  const eScale = Math.max(tauOn * 2.5, 1e-6);
+  diagEnergyFill.style.width = `${Math.round(clamp01((energy || 0) / eScale) * 100)}%`;
+  diagTickOn.style.left = `${Math.round(clamp01(tauOn / eScale) * 100)}%`;
+  diagTickOff.style.left = `${Math.round(clamp01(tauOff / eScale) * 100)}%`;
+
+  let lvl = null;
+  if (voice.mic && voice.mic.running) {
+    try { lvl = Number(voice.mic.level()) || 0; } catch { lvl = null; }
+  }
+  const bar = voicedBar();
+  diagMic.textContent = fmtDiagNum(lvl, 3);
+  diagBarNum.textContent = `bar ${fmtDiagNum(bar, 3)}`;
+  const mScale = Math.max(bar * 2.5, 0.02);
+  diagMicFill.style.width = `${Math.round(clamp01((lvl || 0) / mScale) * 100)}%`;
+  diagTickBar.style.left = `${Math.round(clamp01(bar / mScale) * 100)}%`;
+}
+
+/** Per-frame hook — one boolean check when the toggle is off, ~7 Hz when on. */
+function diagFrame(frame) {
+  if (!diagOn) return;
+  const now = performance.now();
+  if (now - diagLastLiveAt < DIAG_FRAME_MS) return;
+  diagLastLiveAt = now;
+  updateDiagLive(frame);
+  renderDiagStatic();
+}
+
+function setDiagOn(on) {
+  diagOn = !!on;
+  diagHud.hidden = !diagOn;
+  if (diagOn) {
+    updateDiagLive(null); // camera may be off — rows read as dashes, honestly
+    renderDiagStatic();
+    renderDiagEvents();
+  }
+}
+
+diagToggle.addEventListener('change', () => setDiagOn(diagToggle.checked));
+
+/** The compact JSON the user pastes back when something misbehaves. */
+function buildDiagReport() {
+  let engineDiag = null;
+  if (typeof engine.getDiagnostics === 'function') {
+    try { engineDiag = engine.getDiagnostics(); } catch { engineDiag = null; }
+  }
+  const lib = libraryOf();
+  const learned = lib.filter((p) => p.learned === true).length;
+  return {
+    ua: navigator.userAgent,
+    ts: new Date().toISOString(),
+    engine: engineDiag,
+    asr: { device: voice.device, model: voice.model, ready: voice.ready },
+    mic: { running: !!(voice.mic && voice.mic.running), floor: micFloor() },
+    lib: { taught: lib.length - learned, learned },
+    lastEvents: diagEvents.slice(-DIAG_EVENTS_MAX),
+  };
+}
+
+diagCopy.addEventListener('click', () => {
+  let json;
+  try {
+    json = JSON.stringify(buildDiagReport());
+  } catch {
+    toast('could not build the report', null, 'bad');
+    return;
+  }
+  if (!navigator.clipboard) {
+    toast('clipboard unavailable in this browser', null, 'bad');
+    return;
+  }
+  navigator.clipboard.writeText(json).then(() => {
+    toast('report copied', null);
+  }).catch(() => {
+    toast('clipboard blocked by browser', null, 'bad');
+  });
+});
+
 /* ---------------------------------------------------------------- service worker */
 
 if ('serviceWorker' in navigator
@@ -1732,4 +2111,7 @@ refreshPhrasebook();
 sizeWave();
 drawWave();
 growPad();
+// SPEC-V5 §5: default sensitivity is 0.60 (the slider's value attribute).
+// The engine's own default is not relied on — set it explicitly from the DOM.
+engine.setSensitivity(Number(sensitivity.value));
 sensOut.textContent = Number(sensitivity.value).toFixed(2);

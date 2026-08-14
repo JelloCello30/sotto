@@ -32,19 +32,79 @@ const DTW_BAND = 8;
  * Segmentation energy. Energy is the mean |delta| per frame across all 22
  * scale-normalized dims, EMA-smoothed. Deliberate mouthing moves roughly six
  * dims by 0.03-0.06 per frame at 30 fps (mean over 22 dims: ~0.010-0.016);
- * a resting face jitters around 0.001-0.003. So trigger at 0.010 with a
- * 3-frame confirmation, and release at half that for clean hysteresis.
+ * a resting face jitters around 0.001-0.003. v0.5 (SPEC-V5 section 1)
+ * derives the live thresholds from a streaming noise-floor estimate; the
+ * fixed values below stay as the cold-start fallback until the floor has
+ * FLOOR_MIN_SAMPLES idle samples.
  */
 const EMA_ALPHA = 0.4;    // per SPEC: alpha ~= 0.4
-const TAU_ON = 0.010;     // enter 'speaking' when energy exceeds this...
-const ON_FRAMES = 3;      // ...for this many consecutive frames
-const TAU_OFF = 0.005;    // hysteresis release threshold (tau_off < tau_on)
-const OFF_FRAMES = 12;    // ~400 ms of stillness at 30 fps ends the utterance
-const PRE_ROLL = 4;       // frames kept from before the trigger frame
-const MIN_SEG_FRAMES = 10;
+const TAU_ON = 0.010;     // cold-start fixed trigger threshold
+const TAU_OFF = 0.005;    // cold-start fixed release threshold
 const MAX_SEG_MS = 6000;
 /** Of the trailing still frames, keep this many as closing context. */
 const TAIL_KEEP = 3;
+
+/**
+ * v0.4 frame-count hysteresis, superseded by the ms durations below. No
+ * longer read by the segmenter; kept exported in CONSTANTS because the
+ * names are part of the public tunables surface.
+ */
+const ON_FRAMES = 3;
+const OFF_FRAMES = 12;
+const PRE_ROLL = 4;
+const MIN_SEG_FRAMES = 10;
+
+/**
+ * v0.5 time-based hysteresis (SPEC-V5): durations accumulated from real
+ * frame timestamps, so segmentation behaves the same at 15/30/60 fps. Each
+ * frame contributes its dt since the previous processed frame, clamped to
+ * HYST_DT_MAX_MS so one janky frame cannot stand in for a whole
+ * confirmation or stillness run. At exactly 30 fps (dt 33.3 ms) the trigger
+ * fires on the 3rd consecutive above-threshold frame (accumulated 100 ms
+ * >= 90) and release on the 12th still frame (400 ms) — the v0.4 counts.
+ */
+const ON_MS = 90;           // continuous above-tauOn time to start a segment
+const OFF_MS = 400;         // continuous below-tauOff time to end one
+const MIN_SEG_MS = 320;     // emitted segments must span at least this
+const PRE_ROLL_MS = 130;    // ring context kept from before the on-run
+const HYST_DT_MAX_MS = 100; // per-frame dt clamp for the accumulators
+
+/**
+ * v0.5 adaptive noise floor (SPEC-V5). While idle with a face tracked, two
+ * streaming quantile trackers estimate the median (p50) and p90 of the EMA
+ * energy. Live thresholds:
+ *   tauOn  = clamp(p50 + K * (p90 - p50 + FLOOR_EPS), TAU_ON_MIN, TAU_ON_MAX)
+ *   tauOff = max(p50 + K_OFF * (p90 - p50 + FLOOR_EPS), tauOn * TAU_OFF_MIN_RATIO)
+ * with K = K_ON * (1.6 - sensitivity), so higher sensitivity lowers the bar
+ * (0..1 -> 1.6x..0.6x). The floor freezes while speaking, during
+ * refractory, and for FLOOR_REACQ_FREEZE_MS after face (re)acquisition or a
+ * visibility gap. Until FLOOR_MIN_SAMPLES idle samples exist, the fixed
+ * TAU_ON/TAU_OFF above apply (cold-start safety).
+ *
+ * Estimator (method, per SPEC-V5): frugal-style stochastic quantile
+ * approximation on the pinball loss with an exponentially-weighted step.
+ * Each idle sample x updates a tracker q for target quantile p as
+ *   q <- q + 2 * w * s * (p - I(x <= q))
+ * where s is an EMA of |x - p50| (adaptive scale, floored at FLOOR_DEV_MIN)
+ * and w = 1 - exp(-dt / FLOOR_TC_MS) the per-sample weight from the real
+ * inter-sample dt (fps-independent). At equilibrium P(x <= q) = p. The
+ * gain is lower-bounded by 1/(n+1) for the first ~150 samples (decreasing-
+ * gain burn-in) so estimates are already usable when adaptive thresholds
+ * engage at FLOOR_MIN_SAMPLES. FLOOR_TC_MS = 5000 is an EMA time constant
+ * of 5 s — comparable to a ~10 s sliding window (FLOOR_WINDOW_MS).
+ */
+const K_ON = 4.0;
+const K_OFF = 1.5;
+const FLOOR_EPS = 0.0008;          // the spec's EPS spread pad
+const TAU_ON_MIN = 0.006;
+const TAU_ON_MAX = 0.030;
+const TAU_OFF_MIN_RATIO = 0.45;    // tauOff >= tauOn * this
+const FLOOR_MIN_SAMPLES = 60;      // idle samples before adaptive engages
+const FLOOR_WINDOW_MS = 10000;     // documented effective window (~10 s)
+const FLOOR_TC_MS = 5000;          // EMA time constant behind that window
+const FLOOR_REACQ_FREEZE_MS = 500; // floor freeze after face reacquisition
+const FLOOR_DT_MAX_MS = 200;       // per-sample weight clamp across gaps
+const FLOOR_DEV_MIN = 0.00001;     // scale floor so the tracker never stalls
 
 /** setSegmentOptions clamp range for maxSegMs (the mic ring holds 30 s). */
 const MAX_SEG_MS_MIN = 2000;
@@ -54,11 +114,12 @@ const MAX_SEG_MS_MAX = 30000;
  * Audio+lip fusion (whisper mode; active only while an audio-level provider
  * is set). AUDIO_ACTIVE_RMS is whisper-level speech with AGC on. While the
  * mic RMS is above it, the segment-start threshold drops to
- * TAU_ON * AUDIO_TAU_ON_FACTOR (quiet-lipped speech triggers; silent lip
+ * tauOn * AUDIO_TAU_ON_FACTOR (quiet-lipped speech triggers; silent lip
  * motion — chewing, smiling — still needs the full threshold) and the
- * still frames required to end a segment double (talking through a
- * lip-still moment does not truncate the utterance; bounded by maxSegMs).
- * Energy itself is lips-only, so audio can never start a segment alone.
+ * stillness time required to end a segment doubles (OFF_MS 400 -> 800;
+ * talking through a lip-still moment does not truncate the utterance;
+ * bounded by maxSegMs). Energy itself is lips-only, so audio can never
+ * start a segment alone.
  */
 const AUDIO_ACTIVE_RMS = 0.012;
 const AUDIO_TAU_ON_FACTOR = 0.55;
@@ -97,8 +158,11 @@ const GEOM_CLAMP = 2;
 /** Smoothing for the reported processing fps. */
 const FPS_ALPHA = 0.2;
 
-/** Ring buffer size: enough for pre-roll + trigger confirmation + slack. */
-const RING_SIZE = 12;
+/**
+ * Ring buffer size: must cover ON_MS of confirmation plus PRE_ROLL_MS of
+ * context at 60 fps (~220 ms, about 14 frames) with slack.
+ */
+const RING_SIZE = 16;
 
 /** The 18 mouth-relevant blendshapes, in feature order (SPEC.md). */
 const BLENDSHAPE_NAMES = [
@@ -140,6 +204,10 @@ export const CONSTANTS = Object.freeze({
   TAU_ACCEPT_SPAN, MARGIN_RATIO, REJECT_FACTOR, MAX_PHRASES, MAX_TAKES,
   FACE_LOST_MS, STORAGE_KEY, MAX_SEG_MS_MIN, MAX_SEG_MS_MAX,
   AUDIO_ACTIVE_RMS, AUDIO_TAU_ON_FACTOR, AUDIO_OFF_FRAMES_FACTOR,
+  // v0.5 adaptive segmentation (SPEC-V5 section 1).
+  ON_MS, OFF_MS, MIN_SEG_MS, PRE_ROLL_MS, HYST_DT_MAX_MS,
+  K_ON, K_OFF, FLOOR_EPS, TAU_ON_MIN, TAU_ON_MAX, TAU_OFF_MIN_RATIO,
+  FLOOR_MIN_SAMPLES, FLOOR_WINDOW_MS, FLOOR_TC_MS, FLOOR_REACQ_FREEZE_MS,
 });
 
 // ---------------------------------------------------------------------------
@@ -449,6 +517,12 @@ function hashString(s) {
  * @property {number} mouthOpen 0..1 convenience scalar (jawOpen blendshape)
  * @property {boolean} faceOk whether a face was tracked this frame
  * @property {number} fps smoothed processing fps
+ * @property {number} energy current EMA articulation energy (the signal the
+ *           segmenter thresholds against)
+ * @property {number} tauOn live segment-start threshold (adaptive once the
+ *           floor has enough samples; includes the audio assist while
+ *           audio-active)
+ * @property {number} tauOff live segment-release threshold
  */
 
 /**
@@ -534,7 +608,10 @@ export class SottoEngine {
     this._prevFeatures = new Float32Array(F_DIM);
     this._haveFeatures = false;
     this._blendIdx = null; // Int16Array(18): our order -> categories index
-    this._frameInfo = { t: 0, features: this._features, mouthOpen: 0, faceOk: false, fps: 0 };
+    this._frameInfo = {
+      t: 0, features: this._features, mouthOpen: 0, faceOk: false, fps: 0,
+      energy: 0, tauOn: TAU_ON, tauOff: TAU_OFF,
+    };
     this._fps = 0;
     this._lastFrameT = 0;
 
@@ -546,15 +623,29 @@ export class SottoEngine {
     this._ringHead = 0;
     this._ringCount = 0;
 
-    // Segmentation state.
+    // Segmentation state (v0.5: ms-based hysteresis over real frame times).
     this._energy = 0;
-    this._onCount = 0;
-    this._offCount = 0;
+    this._onMs = 0;          // accumulated continuous above-tauOn time
+    this._onRunStartT = 0;   // timestamp of the first frame of the on-run
+    this._offMs = 0;         // accumulated continuous below-tauOff time
+    this._offRun = 0;        // frames in the current still run (tail trim)
+    this._segLastT = -1;     // previous _segmentStep timestamp (-1 = none)
     this._speaking = false;
     this._segFrames = null;
     this._segTs = null;
     this._segLevels = null; // per-frame polled audio levels, parallel to _segTs
     this._refractory = false; // after an over-long discard: wait for stillness
+    // v0.5 adaptive noise floor (SPEC-V5; frozen while speaking, during
+    // refractory, and for FLOOR_REACQ_FREEZE_MS after face reacquisition).
+    this._floorP50 = 0;
+    this._floorP90 = 0;
+    this._floorDev = 0;       // EMA of |x - p50|: the quantile step scale
+    this._floorSamples = 0;
+    this._floorLastT = 0;
+    this._floorHoldUntil = 0;
+    this._tauOnBase = TAU_ON; // live start threshold before audio assist
+    this._tauOn = TAU_ON;     // live start threshold (assist included)
+    this._tauOff = TAU_OFF;   // live release threshold
     // Segment options + audio fusion (defaults preserve v0.1 behavior).
     this._maxSegMs = MAX_SEG_MS;
     this._splitOnMax = false;
@@ -720,8 +811,8 @@ export class SottoEngine {
     this._paused = p;
     if (p) {
       if (this._speaking) this._discardSegment();
-      this._onCount = 0;
-      this._offCount = 0;
+      this._resetHysteresis();
+      this._segLastT = -1; // no dt accumulation across the pause
     }
   }
 
@@ -733,8 +824,8 @@ export class SottoEngine {
    *        2000..30000 (the mic ring holds 30 s)
    * @param {boolean} [opts.splitOnMax] when true, an utterance reaching
    *        maxSegMs is emitted as a completed segment and the speaking state
-   *        continues into a fresh segment seeded from the last PRE_ROLL ring
-   *        frames — no discard, no refractory. When false (default), the
+   *        continues into a fresh segment seeded from the ring frames inside
+   *        PRE_ROLL_MS — no discard, no refractory. When false (default), the
    *        over-long utterance is discarded and stillness is required before
    *        re-arming. Splitting never fires while a calibration recording is
    *        armed; the discard behavior applies so phrase takes stay bounded.
@@ -752,10 +843,11 @@ export class SottoEngine {
    * mode). The provider is called at most once per processed frame from
    * inside the segmentation step and must return the current mic RMS in
    * 0..1 (e.g. SottoMic.level()). While the level is above AUDIO_ACTIVE_RMS
-   * the segment-start threshold drops to TAU_ON * 0.55 and the still frames
-   * required to end a segment double — but audio alone never starts a
-   * segment: energy is computed from lip motion only, and lips gate when
-   * the engine listens. A provider exception is treated as level 0; after 3
+   * the segment-start threshold drops to the live tauOn * 0.55 and the
+   * stillness time required to end a segment doubles (OFF_MS 400 -> 800) —
+   * but audio alone never starts a segment: energy is computed from lip
+   * motion only, and lips gate when the engine listens. A provider
+   * exception is treated as level 0; after 3
    * consecutive exceptions the provider is auto-cleared. Non-function
    * values (including null) restore lips-only segmentation (v0.1 behavior;
    * phrases mode).
@@ -1039,6 +1131,33 @@ export class SottoEngine {
     return out;
   }
 
+  // -- diagnostics ----------------------------------------------------------
+
+  /**
+   * Snapshot of the live segmentation diagnostics (SPEC-V5): the EMA
+   * energy, the live thresholds (tauOn includes the audio assist while
+   * audio-active), the adaptive floor quantiles and idle sample count,
+   * smoothed fps, engine state, and whether adaptive thresholds are engaged
+   * (false = cold-start fixed values). Returns a fresh plain object; safe
+   * to call at any rate, camera running or not.
+   * @returns {{energy: number, tauOn: number, tauOff: number,
+   *            floorP50: number, floorP90: number, samples: number,
+   *            fps: number, state: string|null, adaptive: boolean}}
+   */
+  getDiagnostics() {
+    return {
+      energy: this._energy,
+      tauOn: this._tauOn,
+      tauOff: this._tauOff,
+      floorP50: this._floorP50,
+      floorP90: this._floorP90,
+      samples: this._floorSamples,
+      fps: this._fps,
+      state: this._state,
+      adaptive: this._floorSamples >= FLOOR_MIN_SAMPLES,
+    };
+  }
+
   // -- testing / simulation -------------------------------------------------
 
   /**
@@ -1200,13 +1319,17 @@ export class SottoEngine {
       this._cancelScheduled();
       if (this._speaking) this._discardSegment();
       this._energy = 0;
-      this._onCount = 0;
-      this._offCount = 0;
+      this._resetHysteresis();
+      this._segLastT = -1;        // no dt accumulation across the gap
       this._haveFeatures = false; // skip one energy sample on resume
       this._ringHead = 0;         // drop stale pre-roll across the gap
       this._ringCount = 0;
     } else if (this._running) {
       this._lastFrameT = 0; // avoid a bogus fps spike after the gap
+      // The EMA energy re-ramps from 0 after the gap; hold the noise floor
+      // so the ramp does not read as a quieter face (same transient class
+      // as a face reacquisition).
+      this._floorHoldUntil = nowMs() + FLOOR_REACQ_FREEZE_MS;
       this._scheduleFrame();
     }
   }
@@ -1246,7 +1369,12 @@ export class SottoEngine {
     if (faceOk) {
       if (!this._blendIdx) this._buildBlendIndex(bs.categories);
       this._extractFeatures(lms, bs.categories, video);
-      if (!this._faceOk && this._haveFeatures) this._faceRegained = true;
+      if (!this._faceOk) {
+        // Face (re)acquired: freeze the noise floor while the EMA energy
+        // settles (SPEC-V5: 500 ms post-reacquisition).
+        this._floorHoldUntil = t + FLOOR_REACQ_FREEZE_MS;
+        if (this._haveFeatures) this._faceRegained = true;
+      }
       this._faceOk = true;
       this._faceEverSeen = true;
       this._lastFaceT = t;
@@ -1285,8 +1413,8 @@ export class SottoEngine {
       this._faceOk = false;
       if (this._speaking) this._discardSegment();
       this._energy = 0;
-      this._onCount = 0;
-      this._offCount = 0;
+      this._resetHysteresis();
+      this._segLastT = -1; // no dt accumulation across the face gap
       this._ringHead = 0;
       this._ringCount = 0;
       if (this._faceEverSeen && this._state === 'idle' && t - this._lastFaceT > FACE_LOST_MS) {
@@ -1300,6 +1428,9 @@ export class SottoEngine {
       fi.mouthOpen = this._features[0];
       fi.faceOk = faceOk;
       fi.fps = this._fps;
+      fi.energy = this._energy;
+      fi.tauOn = this._tauOn;
+      fi.tauOff = this._tauOff;
       this._emit(this._onFrame, fi);
     }
   }
@@ -1347,21 +1478,48 @@ export class SottoEngine {
     // thresholds below — it can never start a segment by itself.
     const level = this._pollAudioLevel();
     this._ringLevels[(this._ringHead - 1 + RING_SIZE) % RING_SIZE] = level;
+    // Real-frame dt for the ms hysteresis. The clamp keeps one janky frame
+    // from standing in for a whole confirmation or stillness run.
+    let dt = this._segLastT >= 0 ? t - this._segLastT : 0;
+    if (dt < 0) dt = 0;
+    else if (dt > HYST_DT_MAX_MS) dt = HYST_DT_MAX_MS;
+    this._segLastT = t;
+    // Live thresholds (SPEC-V5): adaptive once the floor has enough idle
+    // samples, cold-start fixed values before that. The audio assist lowers
+    // the start threshold exactly as in v0.4.
+    this._refreshThresholds();
+    const audioActive = level > AUDIO_ACTIVE_RMS;
+    const tauOn = audioActive ? this._tauOnBase * AUDIO_TAU_ON_FACTOR : this._tauOnBase;
+    this._tauOn = tauOn;
+    // Hysteresis invariant: the release threshold must sit below the
+    // effective start threshold, or a started segment's frames can count as
+    // "still" and end it early. Reachable without this cap: tauOn clamped to
+    // its max while the tauOff candidate is not, or the audio assist scaling
+    // only tauOn. Report the capped value so the HUD shows the live pair.
+    const tauOff = Math.min(this._tauOff, tauOn * 0.9);
+    this._tauOff = tauOff;
     const e = this._energy;
     if (this._refractory) {
       // After discarding an over-long utterance: require stillness before
       // re-arming, so one continuous movement cannot retrigger instantly.
-      if (e < TAU_OFF) this._refractory = false;
+      // (The noise floor stays frozen through refractory.)
+      if (e < tauOff) this._refractory = false;
       return;
     }
-    const audioActive = level > AUDIO_ACTIVE_RMS;
     if (!this._speaking) {
-      const tauOn = audioActive ? TAU_ON * AUDIO_TAU_ON_FACTOR : TAU_ON;
+      // Idle with a face tracked: feed the noise-floor trackers unless a
+      // post-reacquisition hold is active (speaking and refractory frames
+      // never reach this point, so the floor is frozen there by
+      // construction).
+      if (t >= this._floorHoldUntil && this._state === 'idle') {
+        this._floorUpdate(t, e);
+      }
       if (e > tauOn) {
-        this._onCount++;
-        if (this._onCount >= ON_FRAMES) this._beginSegment();
+        if (this._onMs === 0) this._onRunStartT = t;
+        this._onMs += dt;
+        if (this._onMs >= ON_MS) this._beginSegment();
       } else {
-        this._onCount = 0;
+        this._onMs = 0;
       }
       return;
     }
@@ -1371,7 +1529,7 @@ export class SottoEngine {
     this._segLevels.push(level);
     if (t - this._segTs[0] > this._maxSegMs) {
       if (this._splitOnMax && !this._pendingRecording) {
-        this._splitSegment();
+        this._splitSegment(t);
       } else {
         // v0.1 behavior, kept as the default and during calibration
         // recording so phrase takes stay bounded.
@@ -1382,13 +1540,86 @@ export class SottoEngine {
     }
     // While audio stays active a lip-still moment needs twice the stillness
     // to end the utterance (bounded: the maxSegMs check above runs first).
-    const offNeeded = audioActive ? OFF_FRAMES * AUDIO_OFF_FRAMES_FACTOR : OFF_FRAMES;
-    if (e < TAU_OFF) {
-      this._offCount++;
-      if (this._offCount >= offNeeded) this._endSegment();
+    const offNeededMs = audioActive ? OFF_MS * AUDIO_OFF_FRAMES_FACTOR : OFF_MS;
+    if (e < tauOff) {
+      this._offMs += dt;
+      this._offRun++;
+      if (this._offMs >= offNeededMs) this._endSegment();
     } else {
-      this._offCount = 0;
+      this._offMs = 0;
+      this._offRun = 0;
     }
+  }
+
+  /**
+   * Recompute the base thresholds from the adaptive floor (SPEC-V5):
+   *   tauOn  = clamp(p50 + K * spread, TAU_ON_MIN, TAU_ON_MAX)
+   *   tauOff = max(p50 + K_OFF * spread, tauOn * TAU_OFF_MIN_RATIO)
+   * with spread = p90 - p50 + FLOOR_EPS and K = K_ON * (1.6 - sensitivity):
+   * higher sensitivity lowers the bar (setSensitivity keeps its DTW-accept
+   * role unchanged). Until FLOOR_MIN_SAMPLES idle samples exist, the fixed
+   * v0.4 TAU_ON/TAU_OFF apply (cold-start safety).
+   * @returns {void}
+   */
+  _refreshThresholds() {
+    if (this._floorSamples >= FLOOR_MIN_SAMPLES) {
+      const spread = this._floorP90 - this._floorP50 + FLOOR_EPS;
+      const kOn = K_ON * (1.6 - this._sensitivity);
+      const tauOn = clamp(this._floorP50 + kOn * spread, TAU_ON_MIN, TAU_ON_MAX);
+      const off = this._floorP50 + K_OFF * spread;
+      const offMin = tauOn * TAU_OFF_MIN_RATIO;
+      this._tauOnBase = tauOn;
+      this._tauOff = off > offMin ? off : offMin;
+    } else {
+      this._tauOnBase = TAU_ON;
+      this._tauOff = TAU_OFF;
+    }
+  }
+
+  /**
+   * One idle sample into the streaming noise-floor estimate. Method (see
+   * the tunables comment): stochastic pinball-loss quantile trackers for
+   * p50 and p90 — q += 2*w*s*(p - I(x <= q)) — with per-sample weight
+   * w = 1 - exp(-dt / FLOOR_TC_MS) from the real inter-sample dt (clamped
+   * to FLOOR_DT_MAX_MS across gaps) and step scale s = EMA of |x - p50|
+   * floored at FLOOR_DEV_MIN. The gain is lower-bounded by 1/(n+1) as a
+   * decreasing-gain burn-in. Effective window is roughly FLOOR_WINDOW_MS
+   * regardless of fps.
+   * @param {number} t sample timestamp (ms)
+   * @param {number} x current EMA energy
+   * @returns {void}
+   */
+  _floorUpdate(t, x) {
+    if (this._floorSamples === 0) {
+      this._floorP50 = x;
+      this._floorP90 = x;
+      this._floorDev = 0;
+      this._floorSamples = 1;
+      this._floorLastT = t;
+      return;
+    }
+    let dt = t - this._floorLastT;
+    this._floorLastT = t;
+    if (!(dt > 0)) dt = 1;
+    else if (dt > FLOOR_DT_MAX_MS) dt = FLOOR_DT_MAX_MS;
+    let w = 1 - Math.exp(-dt / FLOOR_TC_MS);
+    const burnIn = 1 / (this._floorSamples + 1);
+    if (burnIn > w) w = burnIn;
+    const dev = Math.abs(x - this._floorP50);
+    this._floorDev += w * (dev - this._floorDev);
+    const s = this._floorDev > FLOOR_DEV_MIN ? this._floorDev : FLOOR_DEV_MIN;
+    this._floorP50 += 2 * w * s * (x <= this._floorP50 ? -0.5 : 0.5);
+    this._floorP90 += 2 * w * s * (x <= this._floorP90 ? -0.1 : 0.9);
+    if (this._floorP50 < 0) this._floorP50 = 0;
+    if (this._floorP90 < this._floorP50) this._floorP90 = this._floorP50;
+    this._floorSamples++;
+  }
+
+  /** Reset the ms hysteresis accumulators (both directions). */
+  _resetHysteresis() {
+    this._onMs = 0;
+    this._offMs = 0;
+    this._offRun = 0;
   }
 
   /**
@@ -1417,17 +1648,36 @@ export class SottoEngine {
   }
 
   /**
+   * Append every ring frame with timestamp >= cutoffT (oldest first) to the
+   * in-progress segment arrays. Ring timestamps increase, so this takes the
+   * newest contiguous run — "whatever ring frames fall inside" the pre-roll
+   * window (SPEC-V5).
+   * @param {number} cutoffT ms timestamp lower bound (inclusive)
+   * @returns {void}
+   */
+  _seedFromRing(cutoffT) {
+    for (let k = this._ringCount; k >= 1; k--) {
+      const idx = (this._ringHead - k + RING_SIZE * 2) % RING_SIZE;
+      if (this._ringTs[idx] < cutoffT) continue;
+      this._segFrames.push(Array.from(this._ring[idx]));
+      this._segTs.push(this._ringTs[idx]);
+      this._segLevels.push(this._ringLevels[idx]);
+    }
+  }
+
+  /**
    * splitOnMax: the in-flight utterance reached maxSegMs. Emit it as a
    * completed segment (recordingLabel handling unchanged — though splitting
    * never fires while a recording is armed), then immediately continue the
-   * speaking state with a fresh segment seeded from the last PRE_ROLL ring
-   * frames, which overlap the emitted tail (deliberate closing/opening
-   * context). Energy and hysteresis counters carry over untouched; no
-   * refractory, no discard, no state change. A later true still-tail ends
-   * the final piece through _endSegment as usual.
+   * speaking state with a fresh segment seeded from the ring frames inside
+   * PRE_ROLL_MS of the split point, which overlap the emitted tail
+   * (deliberate closing/opening context). Energy and hysteresis accumulators
+   * carry over untouched; no refractory, no discard, no state change. A
+   * later true still-tail ends the final piece through _endSegment as usual.
+   * @param {number} t timestamp of the frame that crossed maxSegMs
    * @returns {void}
    */
-  _splitSegment() {
+  _splitSegment(t) {
     const frames = this._segFrames;
     const ts = this._segTs;
     const seg = {
@@ -1440,35 +1690,23 @@ export class SottoEngine {
     // Reseed before emitting so callbacks observe a consistent engine. The
     // fresh level array starts from the reseeded ring frames only, so each
     // split piece averages exactly its own span.
-    const take = Math.min(this._ringCount, PRE_ROLL);
     this._segFrames = [];
     this._segTs = [];
     this._segLevels = [];
-    for (let k = take; k >= 1; k--) {
-      const idx = (this._ringHead - k + RING_SIZE * 2) % RING_SIZE;
-      this._segFrames.push(Array.from(this._ring[idx]));
-      this._segTs.push(this._ringTs[idx]);
-      this._segLevels.push(this._ringLevels[idx]);
-    }
+    this._seedFromRing(t - PRE_ROLL_MS);
     this._finishSegment(seg);
   }
 
   _beginSegment() {
-    // Seed the segment with PRE_ROLL frames before the trigger frame plus the
-    // ON_FRAMES confirmation frames (the most recent ring entry is current).
-    const take = Math.min(this._ringCount, ON_FRAMES + PRE_ROLL);
+    // Seed the segment with the on-run frames plus whatever ring frames
+    // fall inside PRE_ROLL_MS before the run started (the most recent ring
+    // entry is the current frame).
     this._segFrames = [];
     this._segTs = [];
     this._segLevels = [];
-    for (let k = take; k >= 1; k--) {
-      const idx = (this._ringHead - k + RING_SIZE * 2) % RING_SIZE;
-      this._segFrames.push(Array.from(this._ring[idx]));
-      this._segTs.push(this._ringTs[idx]);
-      this._segLevels.push(this._ringLevels[idx]);
-    }
+    this._seedFromRing(this._onRunStartT - PRE_ROLL_MS);
     this._speaking = true;
-    this._onCount = 0;
-    this._offCount = 0;
+    this._resetHysteresis();
     this._setState('speaking');
   }
 
@@ -1477,8 +1715,7 @@ export class SottoEngine {
     this._segFrames = null;
     this._segTs = null;
     this._segLevels = null;
-    this._onCount = 0;
-    this._offCount = 0;
+    this._resetHysteresis();
     if (this._state === 'speaking') this._setState('idle');
   }
 
@@ -1486,20 +1723,21 @@ export class SottoEngine {
     const frames = this._segFrames;
     const ts = this._segTs;
     const levels = this._segLevels;
-    // The trailing still run is exactly _offCount consecutive sub-threshold
-    // frames (OFF_FRAMES in lips-only mode; up to double under audio
-    // fusion); keep a few as closing context and drop the rest so segments
-    // are not padded with 400 ms or more of nothing.
-    const stillRun = this._offCount;
+    // The trailing still run is exactly the frames whose accumulated dt
+    // reached OFF_MS (doubled under audio fusion); keep a few as closing
+    // context and drop the rest so segments are not padded with 400 ms or
+    // more of nothing.
+    const stillRun = this._offRun;
     this._speaking = false;
     this._segFrames = null;
     this._segTs = null;
     this._segLevels = null;
-    this._onCount = 0;
-    this._offCount = 0;
+    this._resetHysteresis();
     this._setState('idle');
     const keep = frames.length - (stillRun - TAIL_KEEP);
-    if (keep < MIN_SEG_FRAMES) return; // too short — discard silently
+    // Too short — discard silently. Duration-based per SPEC-V5 (MIN_SEG_MS);
+    // the 2-row floor keeps downstream frame validation satisfied.
+    if (keep < 2 || ts[keep - 1] - ts[0] < MIN_SEG_MS) return;
     frames.length = keep;
     ts.length = keep;
     levels.length = keep; // audioLevel averages only the emitted frames
@@ -1648,8 +1886,9 @@ export class SottoEngine {
 
   _resetRuntime() {
     this._energy = 0;
-    this._onCount = 0;
-    this._offCount = 0;
+    this._resetHysteresis();
+    this._segLastT = -1;
+    this._onRunStartT = 0;
     this._speaking = false;
     this._segFrames = null;
     this._segTs = null;
@@ -1664,6 +1903,18 @@ export class SottoEngine {
     this._fps = 0;
     this._lastFrameT = 0;
     this._lastMediaTime = -1;
+    // The noise floor is re-learned each start(): camera, lighting, and
+    // seating may all have changed. Cold-start fixed thresholds cover the
+    // first FLOOR_MIN_SAMPLES idle frames (~2 s at 30 fps).
+    this._floorP50 = 0;
+    this._floorP90 = 0;
+    this._floorDev = 0;
+    this._floorSamples = 0;
+    this._floorLastT = 0;
+    this._floorHoldUntil = 0;
+    this._tauOnBase = TAU_ON;
+    this._tauOn = TAU_ON;
+    this._tauOff = TAU_OFF;
     // _lastTs is intentionally NOT reset: the detector requires strictly
     // increasing timestamps across stop()/start() with a kept model.
   }

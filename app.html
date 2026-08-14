@@ -95,13 +95,39 @@
         <p class="cam-privacy" id="cam-privacy">Camera only. The microphone is off; silent phrases still work.</p>
       </div>
 
+      <!-- Diagnostics HUD (SPEC-V5): hidden unless the settings toggle is on. -->
+      <aside class="card diag" id="diag-hud" aria-labelledby="diag-h" hidden>
+        <div class="diag-head">
+          <h3 id="diag-h">Diagnostics</h3>
+          <span class="diag-num" id="diag-fps">— fps</span>
+        </div>
+        <div class="diag-row">
+          <span class="diag-key">energy</span>
+          <span class="diag-num" id="diag-energy">—</span>
+          <span class="diag-bar" aria-hidden="true"><i id="diag-energy-fill"></i><b id="diag-tick-on"></b><b class="is-soft" id="diag-tick-off"></b></span>
+          <span class="diag-num is-soft" id="diag-tau">on — · off —</span>
+        </div>
+        <div class="diag-row">
+          <span class="diag-key">mic</span>
+          <span class="diag-num" id="diag-mic">—</span>
+          <span class="diag-bar" aria-hidden="true"><i id="diag-mic-fill"></i><b id="diag-tick-bar"></b></span>
+          <span class="diag-num is-soft" id="diag-bar-num">bar —</span>
+        </div>
+        <p class="diag-line" id="diag-floor">floor —</p>
+        <p class="diag-line" id="diag-asr">asr —</p>
+        <p class="diag-line" id="diag-lib">library —</p>
+        <p class="diag-line diag-events-head">last events</p>
+        <ol class="diag-events" id="diag-events"></ol>
+        <p class="diag-line" id="diag-empty">nothing yet — segments, transcripts, and learns land here.</p>
+      </aside>
+
       <div class="cam-controls">
         <button class="btn" id="cam-toggle">Start camera</button>
         <div class="ctl ctl-sens">
           <label for="sensitivity">Sensitivity</label>
-          <input type="range" id="sensitivity" min="0" max="1" step="0.01" value="0.5"
+          <input type="range" id="sensitivity" min="0" max="1" step="0.01" value="0.6"
                  aria-describedby="sens-hint">
-          <output class="mono-num" id="sens-out" for="sensitivity">0.50</output>
+          <output class="mono-num" id="sens-out" for="sensitivity">0.60</output>
         </div>
         <span class="visually-hidden" id="sens-hint">Higher accepts looser matches, lower demands closer ones.</span>
         <label class="switch">
@@ -207,6 +233,21 @@
       <h4>Starter pack</h4>
       <p class="soft">Six everyday phrases, guided calibration, about two minutes. Run it any time.</p>
       <button class="btn-ghost" id="starter-btn">Teach the starter six</button>
+    </div>
+
+    <hr class="rule">
+
+    <div class="drawer-block">
+      <h4>Diagnostics</h4>
+      <p class="soft">A live HUD under the camera: thresholds, levels, and the last few routing decisions. Costs nothing while off. Copy report puts the same numbers on the clipboard as JSON — paste it when reporting a problem.</p>
+      <div class="diag-controls">
+        <label class="switch">
+          <input type="checkbox" id="diag-toggle">
+          <span class="track" aria-hidden="true"></span>
+          <span class="switch-label">Show diagnostics</span>
+        </label>
+        <button class="btn-ghost btn-sm" id="diag-copy">Copy report</button>
+      </div>
     </div>
 
     <hr class="rule">
